@@ -1,0 +1,18 @@
+pre-commit:
+  commands:
+    golangci-lint:
+      glob: "*.go"
+      run: golangci-lint run ./...
+    goimports:
+      glob: "*.go"
+      run: goimports -l -w {staged_files}
+      stage_fixed: true
+    gofmt:
+      glob: "*.go"
+      run: gofmt -l -w {staged_files}
+      stage_fixed: true
+
+commit-msg:
+  commands:
+    conventional-commits:
+      run: sh scripts/check-commit-msg.sh {1}

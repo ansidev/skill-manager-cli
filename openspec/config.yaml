@@ -1,0 +1,75 @@
+schema: spec-driven
+
+context: |
+  Development methodology:
+  - Follow specification-driven development using OpenSpec.
+  - Follow test-driven development using Superpowers.
+  - Prefer existing project conventions and testing tools.
+  - Treat verification evidence as mandatory before claiming success.
+
+  Skill integration:
+  - Use installed skills rather than duplicating their instructions.
+  - Load and follow the complete instructions of each required skill.
+  - Do not silently bypass unavailable required skills.
+  - Report any missing skills or verification blockers.
+
+  Verification policy:
+  - Use verification-before-completion before
+    claiming implementation or verification success.
+  - Use openspec-verify-change for change-level verification.
+  - Resolve critical verification findings before archiving.
+
+rules:
+  specs:
+    - Define observable, testable behavior and edge cases.
+    - Include scenarios suitable for automated testing.
+
+  design:
+    - Consider testability and existing testing conventions.
+    - Identify integration boundaries and testing strategies.
+
+  tasks:
+    - Break implementation into small, independently testable behaviors.
+    - Organize behavior changes to support RED-GREEN-REFACTOR.
+    - Include regression tests for bug fixes.
+    - Avoid deferring all testing to the end.
+    - Include change-level verification before archiving.
+
+operations:
+  apply:
+    guidance:
+      - >-
+        Before implementing behavior changes, load and follow
+        test-driven-development.
+      - >-
+        For each behavior, follow the complete
+        RED-GREEN-REFACTOR cycle.
+      - >-
+        Write a failing test and observe its expected failure
+        before implementing production behavior.
+      - >-
+        Implement only enough production code to pass the test,
+        then refactor while keeping tests green.
+      - >-
+        Before marking implementation tasks complete, load
+        and follow verification-before-completion.
+      - >-
+        Run relevant verification commands and inspect their
+        actual output before reporting success.
+      - >-
+        Do not mark tasks complete when their required
+        verification has failed.
+
+  archive:
+    guidance:
+      - >-
+        Require openspec-verify-change to have been performed
+        before archiving the change.
+      - >-
+        Ensure verification-before-completion
+        has been followed for the final verification claims.
+      - >-
+        Do not archive when critical verification findings
+        remain unresolved.
+      - >-
+        Report unresolved warnings and verification limitations.
