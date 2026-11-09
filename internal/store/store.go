@@ -154,10 +154,15 @@ func directoriesEqual(leftPath, rightPath string) (bool, error) {
 	if !leftInfo.IsDir() {
 		return false, fmt.Errorf("source skill %q is not a directory", leftPath)
 	}
-	if _, err := os.Stat(rightPath); os.IsNotExist(err) {
+	rightInfo, err := os.Lstat(rightPath)
+	if os.IsNotExist(err) {
 		return false, nil
-	} else if err != nil {
+	}
+	if err != nil {
 		return false, fmt.Errorf("inspect stored skill: %w", err)
+	}
+	if !rightInfo.IsDir() || rightInfo.Mode()&os.ModeSymlink != 0 {
+		return false, nil
 	}
 
 	equal := true
@@ -186,6 +191,20 @@ func directoriesEqual(leftPath, rightPath string) (bool, error) {
 			return filepath.SkipDir
 		}
 		if entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			leftTarget, err := os.Readlink(leftFilePath)
+			if err != nil {
+				return err
+			}
+			rightTarget, err := os.Readlink(rightFilePath)
+			if err != nil {
+				return err
+			}
+			if leftTarget != rightTarget {
+				equal = false
+			}
 			return nil
 		}
 		leftContents, err := os.ReadFile(leftFilePath)

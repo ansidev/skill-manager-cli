@@ -41,6 +41,59 @@ func TestStoreSkillSkipsIdenticalDestination(t *testing.T) {
 	}
 }
 
+func TestStoreSkillReplacesDestinationSymlinkWithPhysicalCopy(t *testing.T) {
+	root := t.TempDir()
+	source := writeSkill(t, root, "source", map[string]string{"SKILL.md": "# Example\n"})
+	external := writeSkill(t, root, "external/example", map[string]string{"SKILL.md": "# Example\n"})
+	destination := filepath.Join(root, "store", "example")
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, destination); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := StoreSkill(source, destination)
+	if err != nil {
+		t.Fatalf("StoreSkill() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("StoreSkill() changed = false, want replacement of destination symlink")
+	}
+	info, err := os.Lstat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("destination remains a symlink, want physical store copy")
+	}
+}
+
+func TestStoreSkillTreatsDifferentSymlinkTargetsAsChanged(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "shared")
+	if err := os.WriteFile(shared, []byte("same contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSkill(t, root, "source", map[string]string{"SKILL.md": "# Example\n"})
+	if err := os.Symlink("../shared", filepath.Join(source, "payload")); err != nil {
+		t.Fatal(err)
+	}
+	destination := writeSkill(t, root, "store/example", map[string]string{"SKILL.md": "# Example\n"})
+	if err := os.Symlink("../../shared", filepath.Join(destination, "payload")); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := StoreSkill(source, destination)
+	if err != nil {
+		t.Fatalf("StoreSkill() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("StoreSkill() changed = false, want replacement for different symlink targets")
+	}
+	assertLinkTarget(t, filepath.Join(destination, "payload"), "../shared")
+}
+
 func TestStoreSkillReplacesChangedDestination(t *testing.T) {
 	root := t.TempDir()
 	source := writeSkill(t, root, "source", map[string]string{
