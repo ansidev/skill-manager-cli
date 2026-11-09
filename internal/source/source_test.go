@@ -77,6 +77,21 @@ func TestResolveSkillsFixtures(t *testing.T) {
 	}
 }
 
+func TestResolveSkillsAcceptsTemporaryRepositoryRoot(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "skills", "alpha"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ResolveSkills(root, []config.SkillEntry{{Name: "alpha"}})
+	if paths := resolvedPaths(got.Skills); len(paths) != 1 {
+		t.Errorf("resolved paths = %v, want one path", paths)
+	}
+	if failed := failedNames(got.Failures); failed != nil {
+		t.Errorf("failed selections = %v, want none", failed)
+	}
+}
+
 func TestResolveSkillsAcceptsRelativeRepositoryRoot(t *testing.T) {
 	root := filepath.Join("testdata", "repository")
 	absoluteRoot, err := filepath.Abs(root)

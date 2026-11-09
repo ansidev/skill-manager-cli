@@ -235,9 +235,6 @@ func resolveBasePath(root, canonicalRoot, base string) (string, error) {
 }
 
 func resolveDirectory(root, canonicalRoot, path string) (string, error) {
-	if !isWithin(root, path) {
-		return "", fmt.Errorf("path %q escapes repository root", path)
-	}
 	canonicalPath, err := canonicalDirectory(path)
 	if err != nil {
 		return "", err
