@@ -24,7 +24,7 @@ const defaultConfigPath = "config.yaml"
 // New creates a new CLI application with the given version and commit info.
 func New(versionStr, commitStr string) *cli.App {
 	return &cli.App{
-		Name:    "skill-manager",
+		Name:    "skill-manager-cli",
 		Usage:   "Manage agent skills for coding assistants",
 		Version: fmt.Sprintf("%s (commit %s)", versionStr, commitStr),
 		Commands: []*cli.Command{

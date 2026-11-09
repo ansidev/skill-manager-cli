@@ -10,5 +10,5 @@ type Info struct {
 
 // String returns a formatted version string.
 func (i Info) String() string {
-	return fmt.Sprintf("skill-manager version %s (commit %s)", i.Version, i.Commit)
+	return fmt.Sprintf("skill-manager-cli version %s (commit %s)", i.Version, i.Commit)
 }

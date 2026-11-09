@@ -119,7 +119,7 @@ func Load(path string) (*Config, error) {
 
 // ExampleConfig returns a commented example demonstrating the full schema.
 func ExampleConfig() string {
-	return `# skill-manager config
+	return `# skill-manager-cli config
 #
 # dirs: agent identifier -> that agent's skill directory.
 dirs:

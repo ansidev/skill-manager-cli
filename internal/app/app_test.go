@@ -21,13 +21,13 @@ func TestNew(t *testing.T) {
 			name:    "with version and commit",
 			version: "1.0.0",
 			commit:  "abc123",
-			want:    "skill-manager",
+			want:    "skill-manager-cli",
 		},
 		{
 			name:    "with defaults",
 			version: "dev",
 			commit:  "unknown",
-			want:    "skill-manager",
+			want:    "skill-manager-cli",
 		},
 	}
 
@@ -88,7 +88,7 @@ func TestNew_VersionFlagsPrintVersionAndCommit(t *testing.T) {
 				t.Fatalf("Run(%s) returned error: %v", argument, err)
 			}
 
-			want := "skill-manager version 1.0.0 (commit abc123)"
+			want := "skill-manager-cli version 1.0.0 (commit abc123)"
 			if got := output.String(); got != want+"\n" {
 				t.Errorf("Run(%s) output = %q, want %q", argument, got, want+"\n")
 			}
