@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ansidev/skill-manager-cli/internal/config"
 )
 
 func TestNew(t *testing.T) {
@@ -127,7 +129,7 @@ func TestApplyInstallsConfiguredLocalSkill(t *testing.T) {
 	}
 
 	linkPath := filepath.Join(target, "example")
-	storePath := filepath.Join(root, ".skill-manager", "skills", "example")
+	storePath := filepath.Join(root, ".agents", "skills", "example")
 	got, err := os.Readlink(linkPath)
 	if err != nil {
 		t.Fatalf("Readlink(%q): %v", linkPath, err)
@@ -159,7 +161,7 @@ func TestApplyRejectionDoesNotMutate(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(target, "example")); !os.IsNotExist(err) {
 		t.Fatalf("target mutation error = %v, want no target skill", err)
 	}
-	if _, err := os.Lstat(filepath.Join(root, ".skill-manager", "skills", "example")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(root, ".agents", "skills", "example")); !os.IsNotExist(err) {
 		t.Fatalf("store mutation error = %v, want no stored skill", err)
 	}
 }
@@ -182,7 +184,7 @@ func TestApplyDryRunDoesNotMutate(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(target, "example")); !os.IsNotExist(err) {
 		t.Fatalf("target mutation error = %v, want no target skill", err)
 	}
-	if _, err := os.Lstat(filepath.Join(root, ".skill-manager", "skills", "example")); !os.IsNotExist(err) {
+	if _, err := os.Lstat(filepath.Join(root, ".agents", "skills", "example")); !os.IsNotExist(err) {
 		t.Fatalf("store mutation error = %v, want no stored skill", err)
 	}
 }
@@ -197,7 +199,7 @@ func TestApplyUninstallsMissingSourceSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(root, "agent", "skills")
-	storePath := filepath.Join(root, ".skill-manager", "skills", "example")
+	storePath := filepath.Join(root, ".agents", "skills", "example")
 	writeFile(t, filepath.Join(storePath, "SKILL.md"), "# Example\n")
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatal(err)
@@ -230,12 +232,25 @@ func TestApplyContinuesAfterSkillSelectionFailure(t *testing.T) {
 	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+target+"\nskills:\n  - repo: "+repository+"\n    provider:\n      type: local\n    skills:\n      - name: missing\n      - name: valid\n")
 
 	app := New("dev", "test")
+	var output bytes.Buffer
+	app.Writer = &output
 	if err := app.Run([]string{"skill", "apply", "--yes", "--agents", "pi"}); err == nil {
 		t.Fatal("apply returned nil error, want summary of the missing skill failure")
 	}
 	if _, err := os.Stat(filepath.Join(target, "valid", "SKILL.md")); err != nil {
 		t.Fatalf("valid skill was not applied after independent failure: %v", err)
 	}
+	assertOutputContains(t, output.String(),
+		"operation=apply",
+		"skill=missing",
+		"action=failed",
+		"error=",
+		"skill=valid",
+		"action=installed",
+		"msg=summary",
+		"operations=2",
+		"failed=1",
+	)
 }
 
 func changeDirectory(t *testing.T, path string) {
@@ -453,5 +468,219 @@ func TestDebugFlagEmitsDebugLogs(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "level=DEBUG") {
 		t.Fatalf("expected debug logs, got:\n%s", output.String())
+	}
+}
+
+func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	work := t.TempDir()
+	t.Chdir(work)
+
+	application := New("dev", "test")
+	var output bytes.Buffer
+	application.Writer = &output
+	application.Reader = strings.NewReader("")
+
+	if err := application.Run([]string{"skill", "init"}); err != nil {
+		t.Fatalf("init returned error: %v\n%s", err, output.String())
+	}
+	if _, err := os.Stat(filepath.Join(work, "config.yaml")); err != nil {
+		t.Fatalf("init did not create config.yaml: %v", err)
+	}
+	if _, err := config.Load(filepath.Join(work, "config.yaml")); err != nil {
+		t.Fatalf("generated config is not loadable: %v", err)
+	}
+
+	repository := filepath.Join(work, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "alpha", "SKILL.md"), "# Alpha\n")
+	writeFile(t, filepath.Join(repository, "skills", "beta", "SKILL.md"), "# Beta\n")
+	namedTarget := filepath.Join(work, "named-skills")
+	wildcardTarget := filepath.Join(work, "wildcard-skills")
+	storeRoot := filepath.Join(home, ".agents", "skills")
+
+	writeLifecycleConfig(t, repository, namedTarget, wildcardTarget, "      - name: alpha\n")
+
+	output.Reset()
+	application.Reader = strings.NewReader("y\n")
+	if err := application.Run([]string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "alpha", "--skill-dirs", namedTarget}); err != nil {
+		t.Fatalf("confirmed install returned error: %v\n%s", err, output.String())
+	}
+	assertLinkTarget(t, filepath.Join(namedTarget, "alpha"), filepath.Join(storeRoot, "alpha"))
+	assertFileExists(t, filepath.Join(storeRoot, "alpha", "SKILL.md"))
+	assertOutputContains(t, output.String(),
+		"operation=install",
+		"skill=alpha",
+		"action=installed",
+		"repository="+repository,
+		"source="+repository,
+		"path=skills/alpha",
+		"targets="+namedTarget,
+		"dry_run=false",
+		"msg=summary",
+		"operations=1",
+		"failed=0",
+	)
+
+	output.Reset()
+	if err := application.Run([]string{"skill", "uninstall", "--skill", "alpha", "--skill-dirs", namedTarget, "-y"}); err != nil {
+		t.Fatalf("uninstall returned error: %v\n%s", err, output.String())
+	}
+	assertPathMissing(t, filepath.Join(namedTarget, "alpha"))
+	assertPathMissing(t, filepath.Join(storeRoot, "alpha"))
+	assertOutputContains(t, output.String(),
+		"operation=uninstall",
+		"skill=alpha",
+		"action=uninstalled",
+		"dry_run=false",
+		"msg=summary",
+		"failed=0",
+	)
+
+	writeLifecycleConfig(t, repository, namedTarget, wildcardTarget, "      - name: \"*\"\n")
+	output.Reset()
+	if err := application.Run([]string{"skill", "apply", "--yes", "--dry-run", "--agents", "wildcard"}); err != nil {
+		t.Fatalf("dry-run apply returned error: %v\n%s", err, output.String())
+	}
+	for _, skill := range []string{"alpha", "beta"} {
+		assertPathMissing(t, filepath.Join(storeRoot, skill))
+		assertPathMissing(t, filepath.Join(wildcardTarget, skill))
+	}
+	assertOutputContains(t, output.String(),
+		"operation=apply",
+		"skill=alpha",
+		"skill=beta",
+		"action=installed",
+		"path=skills/alpha",
+		"path=skills/beta",
+		"dry_run=true",
+		"msg=summary",
+		"operations=2",
+		"failed=0",
+	)
+
+	output.Reset()
+	application.Reader = strings.NewReader("y\n")
+	if err := application.Run([]string{"skill", "apply", "--agents", "wildcard"}); err != nil {
+		t.Fatalf("confirmed apply returned error: %v\n%s", err, output.String())
+	}
+	for _, skill := range []string{"alpha", "beta"} {
+		assertLinkTarget(t, filepath.Join(wildcardTarget, skill), filepath.Join(storeRoot, skill))
+		assertFileExists(t, filepath.Join(storeRoot, skill, "SKILL.md"))
+	}
+	assertOutputContains(t, output.String(),
+		"operation=apply",
+		"skill=alpha",
+		"skill=beta",
+		"action=installed",
+		"dry_run=false",
+		"operations=2",
+		"failed=0",
+	)
+
+	writeLifecycleConfig(t, repository, namedTarget, wildcardTarget, "      - name: beta\n        state: uninstalled\n")
+	output.Reset()
+	if err := application.Run([]string{"skill", "apply", "--yes", "--agents", "wildcard"}); err != nil {
+		t.Fatalf("apply uninstall returned error: %v\n%s", err, output.String())
+	}
+	assertPathMissing(t, filepath.Join(wildcardTarget, "beta"))
+	assertPathMissing(t, filepath.Join(storeRoot, "beta"))
+	assertLinkTarget(t, filepath.Join(wildcardTarget, "alpha"), filepath.Join(storeRoot, "alpha"))
+	assertOutputContains(t, output.String(),
+		"operation=apply",
+		"skill=beta",
+		"action=uninstalled",
+		"dry_run=false",
+		"operations=1",
+		"failed=0",
+	)
+}
+
+func TestInstallSummaryReportsSkippedOnRepeat(t *testing.T) {
+	repository := t.TempDir()
+	writeFile(t, filepath.Join(repository, "skills", "hello", "SKILL.md"), "# Hello\n")
+	t.Setenv("HOME", t.TempDir())
+	target := filepath.Join(t.TempDir(), "target")
+
+	application := New("dev", "test")
+	var output bytes.Buffer
+	application.Writer = &output
+
+	args := []string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", target, "-y"}
+	if err := application.Run(args); err != nil {
+		t.Fatalf("first install returned error: %v\n%s", err, output.String())
+	}
+	output.Reset()
+	if err := application.Run(args); err != nil {
+		t.Fatalf("repeat install returned error: %v\n%s", err, output.String())
+	}
+	assertOutputContains(t, output.String(),
+		"operation=install",
+		"skill=hello",
+		"action=skipped",
+		"msg=summary",
+		"failed=0",
+	)
+}
+
+func TestUninstallSummaryReportsSkippedWhenNothingManaged(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	target := t.TempDir()
+
+	application := New("dev", "test")
+	var output bytes.Buffer
+	application.Writer = &output
+
+	if err := application.Run([]string{"skill", "uninstall", "--skill", "absent", "--skill-dirs", target, "-y"}); err != nil {
+		t.Fatalf("uninstall of absent skill returned error: %v\n%s", err, output.String())
+	}
+	assertOutputContains(t, output.String(),
+		"operation=uninstall",
+		"skill=absent",
+		"action=skipped",
+		"msg=summary",
+		"failed=0",
+	)
+}
+
+func writeLifecycleConfig(t *testing.T, repository, namedTarget, wildcardTarget, skillEntries string) {
+	t.Helper()
+	contents := "dirs:\n  named: " + namedTarget + "\n  wildcard: " + wildcardTarget +
+		"\nskills:\n  - repo: " + repository +
+		"\n    provider:\n      type: local\n    skills:\n" + skillEntries
+	writeFile(t, filepath.Join(".", "config.yaml"), contents)
+}
+
+func assertLinkTarget(t *testing.T, linkPath, want string) {
+	t.Helper()
+	got, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("Readlink(%q): %v", linkPath, err)
+	}
+	if got != want {
+		t.Fatalf("link %q target = %q, want %q", linkPath, got, want)
+	}
+}
+
+func assertPathMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("path %q error = %v, want absent", path, err)
+	}
+}
+
+func assertFileExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file %q: %v", path, err)
+	}
+}
+
+func assertOutputContains(t *testing.T, output string, fragments ...string) {
+	t.Helper()
+	for _, fragment := range fragments {
+		if !strings.Contains(output, fragment) {
+			t.Fatalf("output missing %q:\n%s", fragment, output)
+		}
 	}
 }

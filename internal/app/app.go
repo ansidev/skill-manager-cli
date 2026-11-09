@@ -54,10 +54,23 @@ func New(versionStr, commitStr string) *cli.App {
 	}
 }
 
-type applyOutcome struct {
-	repository string
-	skill      string
-	err        error
+const (
+	actionInstalled   = "installed"
+	actionUninstalled = "uninstalled"
+	actionSkipped     = "skipped"
+	actionFailed      = "failed"
+)
+
+type operationOutcome struct {
+	Operation  string
+	Skill      string
+	Action     string
+	Repository string
+	Source     string
+	Path       string
+	Targets    []string
+	DryRun     bool
+	Err        error
 }
 
 func applyCommand() *cli.Command {
@@ -76,6 +89,7 @@ func applyCommand() *cli.Command {
 }
 
 func apply(c *cli.Context) error {
+	logger := commandLogger(c, c.Bool("debug"))
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
 		return fmt.Errorf("load config.yaml: %w", err)
@@ -89,14 +103,15 @@ func apply(c *cli.Context) error {
 		return nil
 	}
 
-	home, err := os.UserHomeDir()
+	storeRoot, err := storeRoot()
 	if err != nil {
-		return fmt.Errorf("resolve home directory: %w", err)
+		return err
 	}
-	storeRoot := filepath.Join(home, ".skill-manager", "skills")
-	outcomes := make([]applyOutcome, 0)
+	outcomes := make([]operationOutcome, 0)
 	resolver := source.NewResolver()
 	for _, repository := range cfg.Skills {
+		provider := repository.EffectiveProvider()
+		sourceLocation := repositorySource(repository.Repo, provider)
 		namedUninstalls := make([]config.SkillEntry, 0)
 		entriesToResolve := make([]config.SkillEntry, 0, len(repository.Skills))
 		for _, entry := range repository.Skills {
@@ -110,90 +125,128 @@ func apply(c *cli.Context) error {
 			entriesToResolve = append(entriesToResolve, entry)
 		}
 		for _, entry := range namedUninstalls {
-			outcomes = append(outcomes, applySkill(c, storeRoot, targets, repository.Repo, source.ResolvedSkill{Entry: entry}))
+			outcomes = append(outcomes, applySkill(logger, c, storeRoot, targets, repository.Repo, sourceLocation, config.JoinBase(entry.BasePath, entry.Name), source.ResolvedSkill{Entry: entry}))
 		}
 		if len(entriesToResolve) == 0 {
 			continue
 		}
 
-		workspace, err := resolver.Obtain(repository.Repo, repository.EffectiveProvider())
+		workspace, err := resolver.Obtain(repository.Repo, provider)
 		if err != nil {
-			outcomes = append(outcomes, applyOutcome{repository: repository.Repo, err: err})
+			outcomes = append(outcomes, operationOutcome{
+				Operation:  "apply",
+				Action:     actionFailed,
+				Repository: repository.Repo,
+				Source:     sourceLocation,
+				Targets:    targets,
+				DryRun:     c.Bool("dry-run"),
+				Err:        err,
+			})
 			continue
 		}
 		resolution := source.ResolveSkills(workspace.Path, entriesToResolve)
 		for _, failure := range resolution.Failures {
-			outcomes = append(outcomes, applyOutcome{repository: repository.Repo, skill: failure.Entry.Name, err: failure.Err})
+			outcomes = append(outcomes, operationOutcome{
+				Operation:  "apply",
+				Skill:      failure.Entry.Name,
+				Action:     actionFailed,
+				Repository: repository.Repo,
+				Source:     sourceLocation,
+				Path:       config.JoinBase(failure.Entry.BasePath, failure.Entry.Name),
+				Targets:    targets,
+				DryRun:     c.Bool("dry-run"),
+				Err:        failure.Err,
+			})
 		}
 		for _, skill := range resolution.Skills {
-			outcomes = append(outcomes, applySkill(c, storeRoot, targets, repository.Repo, skill))
+			outcomes = append(outcomes, applySkill(logger, c, storeRoot, targets, repository.Repo, sourceLocation, relativeRepositoryPath(workspace.Path, skill.Path), skill))
 		}
 		if err := workspace.Cleanup(); err != nil {
-			outcomes = append(outcomes, applyOutcome{repository: repository.Repo, err: fmt.Errorf("clean workspace: %w", err)})
+			outcomes = append(outcomes, operationOutcome{
+				Operation:  "apply",
+				Action:     actionFailed,
+				Repository: repository.Repo,
+				Source:     sourceLocation,
+				Targets:    targets,
+				DryRun:     c.Bool("dry-run"),
+				Err:        fmt.Errorf("clean workspace: %w", err),
+			})
 		}
 	}
 
-	failed := 0
-	for _, outcome := range outcomes {
-		if outcome.err == nil {
-			continue
-		}
-		failed++
-		fmt.Fprintf(c.App.Writer, "error: repository %s skill %s: %v\n", outcome.repository, outcome.skill, outcome.err)
-	}
-	fmt.Fprintf(c.App.Writer, "apply finished: %d operation(s), %d failed\n", len(outcomes), failed)
+	failed := logSummary(logger, "apply", outcomes)
 	if failed > 0 {
 		return fmt.Errorf("apply completed with %d failed operation(s)", failed)
 	}
 	return nil
 }
 
-func applySkill(c *cli.Context, storeRoot string, targets []string, repository string, skill source.ResolvedSkill) applyOutcome {
-	outcome := applyOutcome{repository: repository, skill: skill.Entry.Name}
+func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets []string, repository, sourceLocation, inRepoPath string, skill source.ResolvedSkill) operationOutcome {
+	outcome := operationOutcome{
+		Operation:  "apply",
+		Skill:      skill.Entry.Name,
+		Repository: repository,
+		Source:     sourceLocation,
+		Path:       inRepoPath,
+		Targets:    targets,
+		DryRun:     c.Bool("dry-run"),
+	}
 	if !validSkillName(skill.Entry.Name) {
-		outcome.err = fmt.Errorf("invalid skill name %q", skill.Entry.Name)
+		outcome.Action = actionFailed
+		outcome.Err = fmt.Errorf("invalid skill name %q", skill.Entry.Name)
 		return outcome
 	}
 	storePath := filepath.Join(storeRoot, skill.Entry.Name)
 	for _, target := range targets {
 		targetPath := filepath.Join(target, skill.Entry.Name)
 		if err := validateScopedPath(storeRoot, storePath, target, targetPath); err != nil {
-			outcome.err = err
+			outcome.Action = actionFailed
+			outcome.Err = err
 			return outcome
 		}
 	}
-	if c.Bool("debug") {
-		fmt.Fprintf(c.App.Writer, "debug: apply %s from %s\n", skill.Entry.Name, repository)
-	}
-	if c.Bool("dry-run") {
-		fmt.Fprintf(c.App.Writer, "dry-run: %s %s\n", skill.Entry.State, skill.Entry.Name)
+	logger.Debug("evaluating configured skill", "skill", skill.Entry.Name, "repository", repository, "path", inRepoPath)
+	if outcome.DryRun {
+		outcome.Action = actionForState(skill.Entry.State)
+		logger.Info("dry-run: planned skill operation", "skill", skill.Entry.Name, "action", outcome.Action, "targets", strings.Join(targets, ","))
 		return outcome
 	}
 	if skill.Entry.State == "uninstalled" {
-		var targetErr error
-		for _, target := range targets {
-			if _, err := store.UnlinkManagedSkill(storePath, filepath.Join(target, skill.Entry.Name)); err != nil && targetErr == nil {
-				targetErr = fmt.Errorf("unlink %s: %w", target, err)
-			}
+		removed, err := unlinkTargets(logger, storePath, skill.Entry.Name, targets)
+		if err != nil {
+			outcome.Action = actionFailed
+			outcome.Err = err
+			return outcome
 		}
-		if targetErr == nil {
-			outcome.err = store.RemoveSkill(storePath)
-		} else {
-			outcome.err = targetErr
+		if !removed {
+			outcome.Action = actionSkipped
+			return outcome
 		}
+		if err := store.RemoveSkill(storePath); err != nil {
+			outcome.Action = actionFailed
+			outcome.Err = err
+			return outcome
+		}
+		outcome.Action = actionUninstalled
 		return outcome
 	}
-	if _, err := store.StoreSkill(skill.Path, storePath); err != nil {
-		outcome.err = err
+	storeChanged, err := store.StoreSkill(skill.Path, storePath)
+	if err != nil {
+		outcome.Action = actionFailed
+		outcome.Err = err
 		return outcome
 	}
-	var targetErr error
-	for _, target := range targets {
-		if _, err := store.LinkSkill(storePath, filepath.Join(target, skill.Entry.Name)); err != nil && targetErr == nil {
-			targetErr = fmt.Errorf("link %s: %w", target, err)
-		}
+	linkChanged, err := linkTargets(logger, storePath, skill.Entry.Name, targets)
+	if err != nil {
+		outcome.Action = actionFailed
+		outcome.Err = err
+		return outcome
 	}
-	outcome.err = targetErr
+	if storeChanged || linkChanged {
+		outcome.Action = actionInstalled
+	} else {
+		outcome.Action = actionSkipped
+	}
 	return outcome
 }
 
@@ -288,52 +341,100 @@ func install(c *cli.Context) error {
 		return errors.New("at least one target skill directory is required (use --skill-dirs or configure dirs)")
 	}
 
-	workspace, err := source.Obtain(repository.Repo, repository.EffectiveProvider())
+	storeRoot, err := storeRoot()
 	if err != nil {
+		return err
+	}
+	provider := repository.EffectiveProvider()
+	sourceLocation := repositorySource(repository.Repo, provider)
+	basePath := config.JoinBase(entry.BasePath, entry.Name)
+	workspace, err := source.Obtain(repository.Repo, provider)
+	if err != nil {
+		logSummary(logger, "install", []operationOutcome{{
+			Operation:  "install",
+			Action:     actionFailed,
+			Repository: repository.Repo,
+			Source:     sourceLocation,
+			Path:       basePath,
+			Targets:    targets,
+			DryRun:     opts.dryRun,
+			Err:        err,
+		}})
 		return err
 	}
 	defer workspace.Cleanup()
 	resolution := source.ResolveSkills(workspace.Path, []config.SkillEntry{entry})
-	if len(resolution.Failures) > 0 {
-		return fmt.Errorf("resolve skill %q: %w", resolution.Failures[0].Entry.Name, resolution.Failures[0].Err)
-	}
-	if len(resolution.Skills) == 0 {
+	if len(resolution.Skills) == 0 && len(resolution.Failures) == 0 {
 		return fmt.Errorf("no skills selected for %q", repository.Repo)
 	}
 	if err := confirm(c, opts, fmt.Sprintf("install %d skill(s)", len(resolution.Skills))); err != nil {
 		return err
 	}
 
+	outcomes := make([]operationOutcome, 0, len(resolution.Skills)+len(resolution.Failures))
+	for _, failure := range resolution.Failures {
+		outcomes = append(outcomes, operationOutcome{
+			Operation:  "install",
+			Skill:      failure.Entry.Name,
+			Action:     actionFailed,
+			Repository: repository.Repo,
+			Source:     sourceLocation,
+			Path:       config.JoinBase(failure.Entry.BasePath, failure.Entry.Name),
+			Targets:    targets,
+			DryRun:     opts.dryRun,
+			Err:        failure.Err,
+		})
+	}
 	for _, resolved := range resolution.Skills {
-		storePath, err := storePathFor(resolved.Entry.Name)
-		if err != nil {
-			return err
-		}
-		logger.Debug("evaluating skill copy", "skill", resolved.Entry.Name, "source", resolved.Path, "store", storePath)
-		if opts.dryRun {
-			logger.Info("dry-run: would copy skill", "skill", resolved.Entry.Name, "store", storePath)
-		} else if changed, err := store.StoreSkill(resolved.Path, storePath); err != nil {
-			return fmt.Errorf("store skill %q: %w", resolved.Entry.Name, err)
-		} else {
-			logger.Debug("copy decision complete", "skill", resolved.Entry.Name, "changed", changed)
-		}
-
-		for _, target := range targets {
-			linkPath := filepath.Join(target, resolved.Entry.Name)
-			logger.Debug("evaluating skill link", "skill", resolved.Entry.Name, "link", linkPath)
-			if opts.dryRun {
-				logger.Info("dry-run: would link skill", "skill", resolved.Entry.Name, "target", linkPath)
-				continue
-			}
-			changed, err := store.LinkSkill(storePath, linkPath)
-			if err != nil {
-				return fmt.Errorf("link skill %q into %q: %w", resolved.Entry.Name, target, err)
-			}
-			logger.Debug("link decision complete", "skill", resolved.Entry.Name, "changed", changed)
-		}
+		outcomes = append(outcomes, installSkill(logger, opts, storeRoot, targets, repository.Repo, sourceLocation, relativeRepositoryPath(workspace.Path, resolved.Path), resolved))
+	}
+	failed := logSummary(logger, "install", outcomes)
+	if failed > 0 {
+		return fmt.Errorf("install completed with %d failed operation(s)", failed)
 	}
 	logger.Info("finished install")
 	return nil
+}
+
+func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, targets []string, repository, sourceLocation, inRepoPath string, resolved source.ResolvedSkill) operationOutcome {
+	outcome := operationOutcome{
+		Operation:  "install",
+		Skill:      resolved.Entry.Name,
+		Repository: repository,
+		Source:     sourceLocation,
+		Path:       inRepoPath,
+		Targets:    targets,
+		DryRun:     opts.dryRun,
+	}
+	storePath := filepath.Join(storeRoot, resolved.Entry.Name)
+	logger.Debug("evaluating skill copy", "skill", resolved.Entry.Name, "source", resolved.Path, "store", storePath)
+	if opts.dryRun {
+		outcome.Action = actionInstalled
+		logger.Info("dry-run: would copy skill", "skill", resolved.Entry.Name, "store", storePath)
+		for _, target := range targets {
+			logger.Info("dry-run: would link skill", "skill", resolved.Entry.Name, "target", filepath.Join(target, resolved.Entry.Name))
+		}
+		return outcome
+	}
+	storeChanged, err := store.StoreSkill(resolved.Path, storePath)
+	if err != nil {
+		outcome.Action = actionFailed
+		outcome.Err = fmt.Errorf("store skill %q: %w", resolved.Entry.Name, err)
+		return outcome
+	}
+	logger.Debug("copy decision complete", "skill", resolved.Entry.Name, "changed", storeChanged)
+	linkChanged, err := linkTargets(logger, storePath, resolved.Entry.Name, targets)
+	if err != nil {
+		outcome.Action = actionFailed
+		outcome.Err = fmt.Errorf("link skill %q: %w", resolved.Entry.Name, err)
+		return outcome
+	}
+	if storeChanged || linkChanged {
+		outcome.Action = actionInstalled
+	} else {
+		outcome.Action = actionSkipped
+	}
+	return outcome
 }
 
 func uninstall(c *cli.Context) error {
@@ -344,7 +445,7 @@ func uninstall(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	_, entry, err := resolveSelection(opts, cfg, false)
+	repository, entry, err := resolveSelection(opts, cfg, false)
 	if err != nil {
 		return err
 	}
@@ -363,31 +464,44 @@ func uninstall(c *cli.Context) error {
 		return err
 	}
 
-	managedLinksRemoved := false
-	for _, target := range targets {
-		linkPath := filepath.Join(target, entry.Name)
-		logger.Debug("evaluating skill unlink", "skill", entry.Name, "link", linkPath)
-		if opts.dryRun {
-			logger.Info("dry-run: would unlink skill", "skill", entry.Name, "target", linkPath)
-			continue
-		}
-		changed, err := store.UnlinkManagedSkill(storePath, linkPath)
-		if err != nil {
-			return fmt.Errorf("unlink skill %q from %q: %w", entry.Name, target, err)
-		}
-		if changed {
-			managedLinksRemoved = true
-		}
-		logger.Debug("unlink decision complete", "skill", entry.Name, "changed", changed)
+	sourceLocation := ""
+	inRepoPath := ""
+	if strings.TrimSpace(repository.Repo) != "" {
+		sourceLocation = repositorySource(repository.Repo, repository.EffectiveProvider())
+		inRepoPath = config.JoinBase(entry.BasePath, entry.Name)
+	}
+	outcome := operationOutcome{
+		Operation:  "uninstall",
+		Skill:      entry.Name,
+		Repository: repository.Repo,
+		Source:     sourceLocation,
+		Path:       inRepoPath,
+		Targets:    targets,
+		DryRun:     opts.dryRun,
 	}
 	if opts.dryRun {
+		logger.Info("dry-run: would unlink skill", "skill", entry.Name, "targets", strings.Join(targets, ","))
 		logger.Info("dry-run: would remove stored skill", "skill", entry.Name, "store", storePath)
+		outcome.Action = actionUninstalled
+		logSummary(logger, "uninstall", []operationOutcome{outcome})
 		return nil
 	}
-	if managedLinksRemoved {
-		if err := store.RemoveSkill(storePath); err != nil {
-			return fmt.Errorf("remove stored skill %q: %w", entry.Name, err)
-		}
+
+	removed, unlinkErr := unlinkTargets(logger, storePath, entry.Name, targets)
+	if unlinkErr != nil {
+		outcome.Action = actionFailed
+		outcome.Err = unlinkErr
+	} else if !removed {
+		outcome.Action = actionSkipped
+	} else if err := store.RemoveSkill(storePath); err != nil {
+		outcome.Action = actionFailed
+		outcome.Err = fmt.Errorf("remove stored skill %q: %w", entry.Name, err)
+	} else {
+		outcome.Action = actionUninstalled
+	}
+	failed := logSummary(logger, "uninstall", []operationOutcome{outcome})
+	if failed > 0 {
+		return fmt.Errorf("uninstall completed with %d failed operation(s)", failed)
 	}
 	logger.Info("finished uninstall")
 	return nil
@@ -462,12 +576,111 @@ func validateDirectSelection(repository config.Repository, entry config.SkillEnt
 	return config.Validate(&config.Config{Skills: []config.Repository{{Repo: repository.Repo, Provider: repository.Provider, Skills: []config.SkillEntry{entry}}}})
 }
 
-func storePathFor(skill string) (string, error) {
+func storeRoot() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	return filepath.Join(home, ".agents", "skills", skill), nil
+	return filepath.Join(home, ".agents", "skills"), nil
+}
+
+func storePathFor(skill string) (string, error) {
+	root, err := storeRoot()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, skill), nil
+}
+
+func repositorySource(repo string, provider config.Provider) string {
+	if provider.Type == "local" {
+		return repo
+	}
+	return source.ResolveURL(repo, provider)
+}
+
+func relativeRepositoryPath(root, path string) string {
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		canonicalRoot = root
+	}
+	canonicalPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		canonicalPath = path
+	}
+	rel, err := filepath.Rel(canonicalRoot, canonicalPath)
+	if err != nil {
+		return ""
+	}
+	return rel
+}
+
+func actionForState(state string) string {
+	if state == "uninstalled" {
+		return actionUninstalled
+	}
+	return actionInstalled
+}
+
+func linkTargets(logger *slog.Logger, storePath, skillName string, targets []string) (bool, error) {
+	changedAny := false
+	var firstErr error
+	for _, target := range targets {
+		linkPath := filepath.Join(target, skillName)
+		logger.Debug("evaluating skill link", "skill", skillName, "link", linkPath)
+		changed, err := store.LinkSkill(storePath, linkPath)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", target, err)
+			}
+			continue
+		}
+		changedAny = changedAny || changed
+		logger.Debug("link decision complete", "skill", skillName, "changed", changed)
+	}
+	return changedAny, firstErr
+}
+
+func unlinkTargets(logger *slog.Logger, storePath, skillName string, targets []string) (bool, error) {
+	changedAny := false
+	var firstErr error
+	for _, target := range targets {
+		linkPath := filepath.Join(target, skillName)
+		logger.Debug("evaluating skill unlink", "skill", skillName, "link", linkPath)
+		changed, err := store.UnlinkManagedSkill(storePath, linkPath)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", target, err)
+			}
+			continue
+		}
+		changedAny = changedAny || changed
+		logger.Debug("unlink decision complete", "skill", skillName, "changed", changed)
+	}
+	return changedAny, firstErr
+}
+
+func logSummary(logger *slog.Logger, operation string, outcomes []operationOutcome) int {
+	failed := 0
+	for _, outcome := range outcomes {
+		attributes := []any{
+			"operation", operation,
+			"skill", outcome.Skill,
+			"action", outcome.Action,
+			"repository", outcome.Repository,
+			"source", outcome.Source,
+			"path", outcome.Path,
+			"targets", strings.Join(outcome.Targets, ","),
+			"dry_run", outcome.DryRun,
+		}
+		if outcome.Err != nil {
+			failed++
+			attributes = append(attributes, "error", outcome.Err.Error())
+		}
+		logger.Info("operation", attributes...)
+	}
+	logger.Info("summary", "operation", operation, "operations", len(outcomes), "failed", failed)
+	return failed
 }
 
 func confirm(c *cli.Context, opts commandOptions, action string) error {
