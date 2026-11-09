@@ -57,6 +57,11 @@ func TestResolveSkillsFixtures(t *testing.T) {
 			entries:    []config.SkillEntry{{Name: "../outside"}},
 			wantFailed: []string{"../outside"},
 		},
+		{
+			name:       "absolute skill name is a failure",
+			entries:    []config.SkillEntry{{Name: filepath.Join(string(filepath.Separator), "alpha")}},
+			wantFailed: []string{filepath.Join(string(filepath.Separator), "alpha")},
+		},
 	}
 
 	for _, tt := range tests {
@@ -69,6 +74,27 @@ func TestResolveSkillsFixtures(t *testing.T) {
 				t.Errorf("failed selections = %v, want %v", failed, tt.wantFailed)
 			}
 		})
+	}
+}
+
+func TestResolveSkillsAcceptsRelativeRepositoryRoot(t *testing.T) {
+	root := filepath.Join("testdata", "repository")
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := ResolveSkills(root, []config.SkillEntry{{Name: "alpha"}, {Name: "*"}})
+	wantPaths := []string{
+		filepath.Join(absoluteRoot, "skills", "alpha"),
+		filepath.Join(absoluteRoot, "skills", "alpha"),
+		filepath.Join(absoluteRoot, "skills", "beta"),
+	}
+	if paths := resolvedPaths(got.Skills); !reflect.DeepEqual(paths, wantPaths) {
+		t.Errorf("resolved paths = %v, want %v", paths, wantPaths)
+	}
+	if failed := failedNames(got.Failures); failed != nil {
+		t.Errorf("failed selections = %v, want none", failed)
 	}
 }
 

@@ -162,7 +162,14 @@ func Obtain(repo string, provider config.Provider) (*Workspace, error) {
 // entries can still resolve.
 func ResolveSkills(root string, entries []config.SkillEntry) SkillResolution {
 	resolution := SkillResolution{}
-	canonicalRoot, err := canonicalDirectory(root)
+	lexicalRoot, err := filepath.Abs(root)
+	if err != nil {
+		for _, entry := range entries {
+			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: fmt.Errorf("make repository root absolute: %w", err)})
+		}
+		return resolution
+	}
+	canonicalRoot, err := canonicalDirectory(lexicalRoot)
 	if err != nil {
 		for _, entry := range entries {
 			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: fmt.Errorf("resolve repository root: %w", err)})
@@ -171,7 +178,7 @@ func ResolveSkills(root string, entries []config.SkillEntry) SkillResolution {
 	}
 
 	for _, entry := range entries {
-		basePath, err := resolveBasePath(root, canonicalRoot, entry.BasePath)
+		basePath, err := resolveBasePath(lexicalRoot, canonicalRoot, entry.BasePath)
 		if err != nil {
 			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: err})
 			continue
@@ -188,7 +195,7 @@ func ResolveSkills(root string, entries []config.SkillEntry) SkillResolution {
 				if !child.IsDir() {
 					continue
 				}
-				path, err := resolveDirectory(root, canonicalRoot, filepath.Join(basePath, child.Name()))
+				path, err := resolveDirectory(lexicalRoot, canonicalRoot, filepath.Join(basePath, child.Name()))
 				if err != nil {
 					failed := entry
 					failed.Name = child.Name()
@@ -202,7 +209,11 @@ func ResolveSkills(root string, entries []config.SkillEntry) SkillResolution {
 			continue
 		}
 
-		path, err := resolveDirectory(root, canonicalRoot, filepath.Join(basePath, entry.Name))
+		if filepath.IsAbs(entry.Name) {
+			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: fmt.Errorf("skill name %q must be relative to repository root", entry.Name)})
+			continue
+		}
+		path, err := resolveDirectory(lexicalRoot, canonicalRoot, filepath.Join(basePath, entry.Name))
 		if err != nil {
 			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: err})
 			continue
