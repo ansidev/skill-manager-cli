@@ -98,6 +98,7 @@ func apply(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
+	printApplyPlan(c.App.Writer, cfg)
 	if !c.Bool("yes") && !confirmApply(c.App.Reader, c.App.Writer) {
 		fmt.Fprintln(c.App.Writer, "apply cancelled")
 		return nil
@@ -267,6 +268,57 @@ func validateScopedPath(storeRoot, storePath, targetRoot, targetPath string) err
 		return fmt.Errorf("target path %q escapes target root", targetPath)
 	}
 	return nil
+}
+
+func printApplyPlan(writer io.Writer, cfg *config.Config) {
+	type planEntry struct {
+		repo   string
+		skills []string
+	}
+	install := make([]planEntry, 0)
+	uninstall := make([]planEntry, 0)
+	for _, repository := range cfg.Skills {
+		var installSkills, uninstallSkills []string
+		for _, entry := range repository.Skills {
+			if entry.State == "uninstalled" {
+				uninstallSkills = append(uninstallSkills, entry.Name)
+			} else {
+				installSkills = append(installSkills, entry.Name)
+			}
+		}
+		if len(installSkills) > 0 {
+			install = append(install, planEntry{repo: repository.Repo, skills: installSkills})
+		}
+		if len(uninstallSkills) > 0 {
+			uninstall = append(uninstall, planEntry{repo: repository.Repo, skills: uninstallSkills})
+		}
+	}
+	if len(install) == 0 && len(uninstall) == 0 {
+		return
+	}
+	if len(install) > 0 {
+		fmt.Fprintln(writer, "Skills to install")
+		for _, entry := range install {
+			fmt.Fprintf(writer, "  - Repository: %s\n", entry.repo)
+			fmt.Fprintln(writer, "    - Skills:")
+			for _, skill := range entry.skills {
+				fmt.Fprintf(writer, "      - %s\n", skill)
+			}
+		}
+	}
+	if len(uninstall) > 0 {
+		if len(install) > 0 {
+			fmt.Fprintln(writer)
+		}
+		fmt.Fprintln(writer, "Skills to uninstall")
+		for _, entry := range uninstall {
+			fmt.Fprintf(writer, "  - Repository: %s\n", entry.repo)
+			fmt.Fprintln(writer, "    - Skills:")
+			for _, skill := range entry.skills {
+				fmt.Fprintf(writer, "      - %s\n", skill)
+			}
+		}
+	}
 }
 
 func confirmApply(reader io.Reader, writer io.Writer) bool {
