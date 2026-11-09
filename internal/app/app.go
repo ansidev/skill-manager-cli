@@ -132,8 +132,10 @@ func apply(c *cli.Context) error {
 			continue
 		}
 
+		fmt.Fprintf(commandWriter(c), "%s: Cloning...\n", repository.Repo)
 		workspace, err := resolver.Obtain(repository.Repo, provider)
 		if err != nil {
+			fmt.Fprintf(commandWriter(c), "%s: Failed to clone: %v\n", repository.Repo, err)
 			outcomes = append(outcomes, operationOutcome{
 				Operation:  "apply",
 				Action:     actionFailed,
@@ -145,6 +147,7 @@ func apply(c *cli.Context) error {
 			})
 			continue
 		}
+		fmt.Fprintf(commandWriter(c), "%s: Cloned to %s\n", repository.Repo, workspace.Path)
 		resolution := source.ResolveSkills(workspace.Path, entriesToResolve)
 		for _, failure := range resolution.Failures {
 			outcomes = append(outcomes, operationOutcome{
@@ -207,6 +210,7 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 			return outcome
 		}
 	}
+	writer := commandWriter(c)
 	logger.Debug("evaluating configured skill", "skill", skill.Entry.Name, "repository", repository, "path", inRepoPath)
 	if outcome.DryRun {
 		outcome.Action = actionForState(skill.Entry.State)
@@ -214,7 +218,8 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 		return outcome
 	}
 	if skill.Entry.State == "uninstalled" {
-		removed, err := unlinkTargets(logger, storePath, skill.Entry.Name, targets)
+		fmt.Fprintf(writer, "  %s: Uninstalling...\n", skill.Entry.Name)
+		removed, err := unlinkTargets(logger, writer, storePath, skill.Entry.Name, targets)
 		if err != nil {
 			outcome.Action = actionFailed
 			outcome.Err = err
@@ -229,16 +234,19 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 			outcome.Err = err
 			return outcome
 		}
+		fmt.Fprintf(writer, "    Removed from %s\n", storePath)
 		outcome.Action = actionUninstalled
 		return outcome
 	}
+	fmt.Fprintf(writer, "  %s: Installing...\n", skill.Entry.Name)
 	storeChanged, err := store.StoreSkill(skill.Path, storePath)
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = err
 		return outcome
 	}
-	linkChanged, err := linkTargets(logger, storePath, skill.Entry.Name, targets)
+	fmt.Fprintf(writer, "    Installed to %s\n", storePath)
+	linkChanged, err := linkTargets(logger, writer, storePath, skill.Entry.Name, targets)
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = err
@@ -476,7 +484,7 @@ func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, ta
 		return outcome
 	}
 	logger.Debug("copy decision complete", "skill", resolved.Entry.Name, "changed", storeChanged)
-	linkChanged, err := linkTargets(logger, storePath, resolved.Entry.Name, targets)
+	linkChanged, err := linkTargets(logger, os.Stdout, storePath, resolved.Entry.Name, targets)
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = fmt.Errorf("link skill %q: %w", resolved.Entry.Name, err)
@@ -540,7 +548,7 @@ func uninstall(c *cli.Context) error {
 		return nil
 	}
 
-	removed, unlinkErr := unlinkTargets(logger, storePath, entry.Name, targets)
+	removed, unlinkErr := unlinkTargets(logger, os.Stdout, storePath, entry.Name, targets)
 	if unlinkErr != nil {
 		outcome.Action = actionFailed
 		outcome.Err = unlinkErr
@@ -675,11 +683,12 @@ func actionForState(state string) string {
 	return actionInstalled
 }
 
-func linkTargets(logger *slog.Logger, storePath, skillName string, targets []string) (bool, error) {
+func linkTargets(logger *slog.Logger, writer io.Writer, storePath, skillName string, targets []string) (bool, error) {
 	changedAny := false
 	var firstErr error
 	for _, target := range targets {
 		linkPath := filepath.Join(target, skillName)
+		fmt.Fprintf(writer, "    Creating symlink to %s\n", linkPath)
 		logger.Debug("evaluating skill link", "skill", skillName, "link", linkPath)
 		changed, err := store.LinkSkill(storePath, linkPath)
 		if err != nil {
@@ -690,11 +699,12 @@ func linkTargets(logger *slog.Logger, storePath, skillName string, targets []str
 		}
 		changedAny = changedAny || changed
 		logger.Debug("link decision complete", "skill", skillName, "changed", changed)
+		fmt.Fprintf(writer, "    Created symlink to %s\n", linkPath)
 	}
 	return changedAny, firstErr
 }
 
-func unlinkTargets(logger *slog.Logger, storePath, skillName string, targets []string) (bool, error) {
+func unlinkTargets(logger *slog.Logger, writer io.Writer, storePath, skillName string, targets []string) (bool, error) {
 	changedAny := false
 	var firstErr error
 	for _, target := range targets {
