@@ -2,19 +2,24 @@ package app
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/ansidev/skill-manager-cli/internal/config"
+	"github.com/ansidev/skill-manager-cli/internal/skilldirs"
 	"github.com/ansidev/skill-manager-cli/internal/source"
 	"github.com/ansidev/skill-manager-cli/internal/store"
 	"github.com/ansidev/skill-manager-cli/internal/targetdirs"
 
 	"github.com/urfave/cli/v2"
 )
+
+const defaultConfigPath = "config.yaml"
 
 // New creates a new CLI application with the given version and commit info.
 func New(versionStr, commitStr string) *cli.App {
@@ -24,15 +29,25 @@ func New(versionStr, commitStr string) *cli.App {
 		Version: fmt.Sprintf("%s (commit %s)", versionStr, commitStr),
 		Commands: []*cli.Command{
 			{Name: "init", Action: func(c *cli.Context) error {
-				if err := config.WriteExample("config.yaml"); err != nil {
+				if err := config.WriteExample(defaultConfigPath); err != nil {
 					return err
 				}
-				fmt.Println("created config.yaml")
+				fmt.Fprintln(commandWriter(c), "created config.yaml")
 				return nil
 			}},
 			applyCommand(),
-			{Name: "install"},
-			{Name: "uninstall"},
+			{
+				Name:   "install",
+				Usage:  "Install selected skills from one repository",
+				Flags:  directCommandFlags(),
+				Action: install,
+			},
+			{
+				Name:   "uninstall",
+				Usage:  "Remove selected managed skills",
+				Flags:  directCommandFlags(),
+				Action: uninstall,
+			},
 		},
 
 		Action: cli.ShowAppHelp,
@@ -69,7 +84,7 @@ func apply(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	if !c.Bool("yes") && !confirm(c.App.Reader, c.App.Writer) {
+	if !c.Bool("yes") && !confirmApply(c.App.Reader, c.App.Writer) {
 		fmt.Fprintln(c.App.Writer, "apply cancelled")
 		return nil
 	}
@@ -200,7 +215,7 @@ func validateScopedPath(storeRoot, storePath, targetRoot, targetPath string) err
 	return nil
 }
 
-func confirm(reader io.Reader, writer io.Writer) bool {
+func confirmApply(reader io.Reader, writer io.Writer) bool {
 	fmt.Fprint(writer, "Apply configured skill changes? [y/N] ")
 	line, err := bufio.NewReader(reader).ReadString('\n')
 	if err != nil {
@@ -208,4 +223,284 @@ func confirm(reader io.Reader, writer io.Writer) bool {
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes"
+}
+
+type commandOptions struct {
+	repo            string
+	providerType    string
+	providerBaseURL string
+	skill           string
+	skillBasePath   string
+	skillDirs       string
+	agents          string
+	assumeYes       bool
+	debug           bool
+	dryRun          bool
+}
+
+func directCommandFlags() []cli.Flag {
+	return []cli.Flag{
+		&cli.StringFlag{Name: "repo", Usage: "Repository path or provider repository name"},
+		&cli.StringFlag{Name: "provider-type", Usage: "Provider type: github, local, or custom"},
+		&cli.StringFlag{Name: "provider-base-url", Usage: "Base URL for a custom provider"},
+		&cli.StringFlag{Name: "skill", Usage: "Skill name to manage"},
+		&cli.StringFlag{Name: "skill-base-path", Usage: "Path to skills in the repository"},
+		&cli.StringFlag{Name: "skill-dirs", Usage: "Comma-separated target skill directories"},
+		&cli.StringFlag{Name: "agents", Aliases: []string{"a"}, Usage: "Comma-separated configured agent names"},
+		&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip confirmation"},
+		&cli.BoolFlag{Name: "debug", Aliases: []string{"d"}, Usage: "Emit debug logs"},
+		&cli.BoolFlag{Name: "dry-run", Usage: "Report changes without modifying files"},
+	}
+}
+
+func optionsFromContext(c *cli.Context) commandOptions {
+	return commandOptions{
+		repo:            c.String("repo"),
+		providerType:    c.String("provider-type"),
+		providerBaseURL: c.String("provider-base-url"),
+		skill:           c.String("skill"),
+		skillBasePath:   c.String("skill-base-path"),
+		skillDirs:       c.String("skill-dirs"),
+		agents:          c.String("agents"),
+		assumeYes:       c.Bool("yes"),
+		debug:           c.Bool("debug"),
+		dryRun:          c.Bool("dry-run"),
+	}
+}
+
+func install(c *cli.Context) error {
+	opts := optionsFromContext(c)
+	logger := commandLogger(c, opts.debug)
+	logger.Info("starting install")
+	cfg, err := loadOptionalConfig()
+	if err != nil {
+		return err
+	}
+	repository, entry, err := resolveSelection(opts, cfg, true)
+	if err != nil {
+		return err
+	}
+	targets, err := skilldirs.Resolve(opts.skillDirs, opts.agents, cfg)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return errors.New("at least one target skill directory is required (use --skill-dirs or configure dirs)")
+	}
+
+	workspace, err := source.Obtain(repository.Repo, repository.EffectiveProvider())
+	if err != nil {
+		return err
+	}
+	defer workspace.Cleanup()
+	resolution := source.ResolveSkills(workspace.Path, []config.SkillEntry{entry})
+	if len(resolution.Failures) > 0 {
+		return fmt.Errorf("resolve skill %q: %w", resolution.Failures[0].Entry.Name, resolution.Failures[0].Err)
+	}
+	if len(resolution.Skills) == 0 {
+		return fmt.Errorf("no skills selected for %q", repository.Repo)
+	}
+	if err := confirm(c, opts, fmt.Sprintf("install %d skill(s)", len(resolution.Skills))); err != nil {
+		return err
+	}
+
+	for _, resolved := range resolution.Skills {
+		storePath, err := storePathFor(resolved.Entry.Name)
+		if err != nil {
+			return err
+		}
+		logger.Debug("evaluating skill copy", "skill", resolved.Entry.Name, "source", resolved.Path, "store", storePath)
+		if opts.dryRun {
+			logger.Info("dry-run: would copy skill", "skill", resolved.Entry.Name, "store", storePath)
+		} else if changed, err := store.StoreSkill(resolved.Path, storePath); err != nil {
+			return fmt.Errorf("store skill %q: %w", resolved.Entry.Name, err)
+		} else {
+			logger.Debug("copy decision complete", "skill", resolved.Entry.Name, "changed", changed)
+		}
+
+		for _, target := range targets {
+			linkPath := filepath.Join(target, resolved.Entry.Name)
+			logger.Debug("evaluating skill link", "skill", resolved.Entry.Name, "link", linkPath)
+			if opts.dryRun {
+				logger.Info("dry-run: would link skill", "skill", resolved.Entry.Name, "target", linkPath)
+				continue
+			}
+			changed, err := store.LinkSkill(storePath, linkPath)
+			if err != nil {
+				return fmt.Errorf("link skill %q into %q: %w", resolved.Entry.Name, target, err)
+			}
+			logger.Debug("link decision complete", "skill", resolved.Entry.Name, "changed", changed)
+		}
+	}
+	logger.Info("finished install")
+	return nil
+}
+
+func uninstall(c *cli.Context) error {
+	opts := optionsFromContext(c)
+	logger := commandLogger(c, opts.debug)
+	logger.Info("starting uninstall")
+	cfg, err := loadOptionalConfig()
+	if err != nil {
+		return err
+	}
+	_, entry, err := resolveSelection(opts, cfg, false)
+	if err != nil {
+		return err
+	}
+	targets, err := skilldirs.Resolve(opts.skillDirs, opts.agents, cfg)
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return errors.New("at least one target skill directory is required (use --skill-dirs or configure dirs)")
+	}
+	storePath, err := storePathFor(entry.Name)
+	if err != nil {
+		return err
+	}
+	if err := confirm(c, opts, fmt.Sprintf("uninstall skill %q", entry.Name)); err != nil {
+		return err
+	}
+
+	managedLinksRemoved := false
+	for _, target := range targets {
+		linkPath := filepath.Join(target, entry.Name)
+		logger.Debug("evaluating skill unlink", "skill", entry.Name, "link", linkPath)
+		if opts.dryRun {
+			logger.Info("dry-run: would unlink skill", "skill", entry.Name, "target", linkPath)
+			continue
+		}
+		changed, err := store.UnlinkManagedSkill(storePath, linkPath)
+		if err != nil {
+			return fmt.Errorf("unlink skill %q from %q: %w", entry.Name, target, err)
+		}
+		if changed {
+			managedLinksRemoved = true
+		}
+		logger.Debug("unlink decision complete", "skill", entry.Name, "changed", changed)
+	}
+	if opts.dryRun {
+		logger.Info("dry-run: would remove stored skill", "skill", entry.Name, "store", storePath)
+		return nil
+	}
+	if managedLinksRemoved {
+		if err := store.RemoveSkill(storePath); err != nil {
+			return fmt.Errorf("remove stored skill %q: %w", entry.Name, err)
+		}
+	}
+	logger.Info("finished uninstall")
+	return nil
+}
+
+func loadOptionalConfig() (*config.Config, error) {
+	if _, err := os.Stat(defaultConfigPath); os.IsNotExist(err) {
+		return &config.Config{}, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", defaultConfigPath, err)
+	}
+	return config.Load(defaultConfigPath)
+}
+
+func resolveSelection(opts commandOptions, cfg *config.Config, requireRepository bool) (config.Repository, config.SkillEntry, error) {
+	var matched *config.Repository
+	for i := range cfg.Skills {
+		if opts.repo == "" || cfg.Skills[i].Repo == opts.repo {
+			if matched != nil {
+				return config.Repository{}, config.SkillEntry{}, errors.New("repository is ambiguous; provide --repo")
+			}
+			matched = &cfg.Skills[i]
+		}
+	}
+
+	repository := config.Repository{Repo: opts.repo}
+	if matched != nil {
+		repository = *matched
+	}
+	if requireRepository && strings.TrimSpace(repository.Repo) == "" {
+		return config.Repository{}, config.SkillEntry{}, errors.New("repository is required (use --repo or configure exactly one repository)")
+	}
+	provider := repository.EffectiveProvider()
+	if opts.providerType != "" {
+		provider.Type = opts.providerType
+		if opts.providerBaseURL == "" {
+			provider.BaseURL = ""
+		}
+	}
+	if opts.providerBaseURL != "" {
+		provider.BaseURL = opts.providerBaseURL
+	}
+	provider.Normalize()
+	repository.Provider = &provider
+
+	entry := config.SkillEntry{Name: opts.skill, BasePath: opts.skillBasePath}
+	if entry.Name == "" && matched != nil {
+		if len(matched.Skills) != 1 {
+			return config.Repository{}, config.SkillEntry{}, errors.New("skill is required (use --skill or configure exactly one skill)")
+		}
+		entry = matched.Skills[0]
+		if opts.skillBasePath != "" {
+			entry.BasePath = opts.skillBasePath
+		}
+	}
+	if strings.TrimSpace(entry.Name) == "" {
+		return config.Repository{}, config.SkillEntry{}, errors.New("skill is required (use --skill or configure exactly one skill)")
+	}
+	if err := validateDirectSelection(repository, entry); err != nil {
+		return config.Repository{}, config.SkillEntry{}, err
+	}
+	return repository, entry, nil
+}
+
+func validateDirectSelection(repository config.Repository, entry config.SkillEntry) error {
+	if filepath.IsAbs(entry.Name) || filepath.Clean(entry.Name) != entry.Name || entry.Name == "." || entry.Name == ".." || strings.Contains(entry.Name, string(filepath.Separator)) {
+		return fmt.Errorf("skill name %q must be a single directory name", entry.Name)
+	}
+	if entry.State == "" {
+		entry.State = "installed"
+	}
+	return config.Validate(&config.Config{Skills: []config.Repository{{Repo: repository.Repo, Provider: repository.Provider, Skills: []config.SkillEntry{entry}}}})
+}
+
+func storePathFor(skill string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return filepath.Join(home, ".agents", "skills", skill), nil
+}
+
+func confirm(c *cli.Context, opts commandOptions, action string) error {
+	if opts.dryRun || opts.assumeYes {
+		return nil
+	}
+	writer := commandWriter(c)
+	fmt.Fprintf(writer, "Proceed to %s? [y/N]: ", action)
+	reader := c.App.Reader
+	if reader == nil {
+		reader = os.Stdin
+	}
+	answer, err := bufio.NewReader(reader).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read confirmation: %w", err)
+	}
+	if strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes") {
+		return nil
+	}
+	return errors.New("operation cancelled")
+}
+
+func commandLogger(c *cli.Context, debug bool) *slog.Logger {
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+	return slog.New(slog.NewTextHandler(commandWriter(c), &slog.HandlerOptions{Level: level}))
+}
+
+func commandWriter(c *cli.Context) io.Writer {
+	if c.App.Writer != nil {
+		return c.App.Writer
+	}
+	return os.Stdout
 }

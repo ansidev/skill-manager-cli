@@ -178,7 +178,7 @@ func ResolveSkills(root string, entries []config.SkillEntry) SkillResolution {
 	}
 
 	for _, entry := range entries {
-		basePath, err := resolveBasePath(lexicalRoot, canonicalRoot, entry.BasePath)
+		basePath, err := resolveBasePath(canonicalRoot, canonicalRoot, entry.BasePath)
 		if err != nil {
 			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: err})
 			continue
@@ -195,7 +195,7 @@ func ResolveSkills(root string, entries []config.SkillEntry) SkillResolution {
 				if !child.IsDir() {
 					continue
 				}
-				path, err := resolveDirectory(lexicalRoot, canonicalRoot, filepath.Join(basePath, child.Name()))
+				path, err := resolveDirectory(canonicalRoot, canonicalRoot, filepath.Join(basePath, child.Name()))
 				if err != nil {
 					failed := entry
 					failed.Name = child.Name()
@@ -213,7 +213,7 @@ func ResolveSkills(root string, entries []config.SkillEntry) SkillResolution {
 			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: fmt.Errorf("skill name %q must be relative to repository root", entry.Name)})
 			continue
 		}
-		path, err := resolveDirectory(lexicalRoot, canonicalRoot, filepath.Join(basePath, entry.Name))
+		path, err := resolveDirectory(canonicalRoot, canonicalRoot, filepath.Join(basePath, entry.Name))
 		if err != nil {
 			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: err})
 			continue
