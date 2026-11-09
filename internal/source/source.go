@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/ansidev/skill-manager-cli/internal/config"
@@ -17,6 +19,26 @@ import (
 type Workspace struct {
 	Path    string
 	Cleanup func() error
+}
+
+// ResolvedSkill is a configured skill entry resolved to a directory inside a
+// repository workspace.
+type ResolvedSkill struct {
+	Entry config.SkillEntry
+	Path  string
+}
+
+// SelectionFailure records one configured skill entry that could not be
+// resolved. A failure for one entry does not prevent later entries resolving.
+type SelectionFailure struct {
+	Entry config.SkillEntry
+	Err   error
+}
+
+// SkillResolution is the result of resolving all configured skill entries.
+type SkillResolution struct {
+	Skills   []ResolvedSkill
+	Failures []SelectionFailure
 }
 
 // ResolvedSource describes the resolved location for a repository.
@@ -132,6 +154,114 @@ func (r *Resolver) Obtain(repo string, provider config.Provider) (*Workspace, er
 
 func Obtain(repo string, provider config.Provider) (*Workspace, error) {
 	return NewResolver().Obtain(repo, provider)
+}
+
+// ResolveSkills resolves configured skill entries within root. Empty base paths
+// default to "skills". The wildcard name "*" selects direct child directories
+// in lexical order. Invalid entries are collected as failures so independent
+// entries can still resolve.
+func ResolveSkills(root string, entries []config.SkillEntry) SkillResolution {
+	resolution := SkillResolution{}
+	canonicalRoot, err := canonicalDirectory(root)
+	if err != nil {
+		for _, entry := range entries {
+			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: fmt.Errorf("resolve repository root: %w", err)})
+		}
+		return resolution
+	}
+
+	for _, entry := range entries {
+		basePath, err := resolveBasePath(root, canonicalRoot, entry.BasePath)
+		if err != nil {
+			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: err})
+			continue
+		}
+
+		if entry.Name == "*" {
+			children, err := os.ReadDir(basePath)
+			if err != nil {
+				resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: fmt.Errorf("read skill base path: %w", err)})
+				continue
+			}
+			sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
+			for _, child := range children {
+				if !child.IsDir() {
+					continue
+				}
+				path, err := resolveDirectory(root, canonicalRoot, filepath.Join(basePath, child.Name()))
+				if err != nil {
+					failed := entry
+					failed.Name = child.Name()
+					resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: failed, Err: err})
+					continue
+				}
+				resolved := entry
+				resolved.Name = child.Name()
+				resolution.Skills = append(resolution.Skills, ResolvedSkill{Entry: resolved, Path: path})
+			}
+			continue
+		}
+
+		path, err := resolveDirectory(root, canonicalRoot, filepath.Join(basePath, entry.Name))
+		if err != nil {
+			resolution.Failures = append(resolution.Failures, SelectionFailure{Entry: entry, Err: err})
+			continue
+		}
+		resolution.Skills = append(resolution.Skills, ResolvedSkill{Entry: entry, Path: path})
+	}
+
+	return resolution
+}
+
+func resolveBasePath(root, canonicalRoot, base string) (string, error) {
+	if base == "" {
+		base = "skills"
+	}
+	if filepath.IsAbs(base) {
+		return "", fmt.Errorf("base path %q must be relative to repository root", base)
+	}
+	return resolveDirectory(root, canonicalRoot, filepath.Join(root, base))
+}
+
+func resolveDirectory(root, canonicalRoot, path string) (string, error) {
+	if !isWithin(root, path) {
+		return "", fmt.Errorf("path %q escapes repository root", path)
+	}
+	canonicalPath, err := canonicalDirectory(path)
+	if err != nil {
+		return "", err
+	}
+	if !isWithin(canonicalRoot, canonicalPath) {
+		return "", fmt.Errorf("path %q resolves outside repository root", path)
+	}
+	return canonicalPath, nil
+}
+
+func canonicalDirectory(path string) (string, error) {
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("make path absolute: %w", err)
+	}
+	canonicalPath, err := filepath.EvalSymlinks(absolutePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve path %q: %w", absolutePath, err)
+	}
+	info, err := os.Stat(canonicalPath)
+	if err != nil {
+		return "", fmt.Errorf("inspect path %q: %w", canonicalPath, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("path %q is not a directory", canonicalPath)
+	}
+	return canonicalPath, nil
+}
+
+func isWithin(root, path string) bool {
+	relativePath, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return relativePath != ".." && !strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) && !filepath.IsAbs(relativePath)
 }
 
 // bytes import safeguard
