@@ -1,6 +1,8 @@
 package app
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -41,18 +43,65 @@ func TestNew(t *testing.T) {
 	}
 }
 
-func TestNew_HasVersionFlag(t *testing.T) {
+func TestNew_SetsVersion(t *testing.T) {
 	app := New("1.0.0", "abc123")
-	
-	versionFlag := false
-	for _, flag := range app.Flags {
-		if flag.Names()[0] == "version" {
-			versionFlag = true
-			break
+	if got, want := app.Version, "1.0.0 (commit abc123)"; got != want {
+		t.Errorf("New().Version = %q, want %q", got, want)
+	}
+}
+
+func TestNew_HelpShowsVersionUsageAndCommands(t *testing.T) {
+	app := New("1.0.0", "abc123")
+	var output bytes.Buffer
+	app.Writer = &output
+
+	if err := app.Run([]string{"skill", "--help"}); err != nil {
+		t.Fatalf("Run(--help) returned error: %v", err)
+	}
+
+	for _, want := range []string{
+		"1.0.0 (commit abc123)",
+		"Manage agent skills for coding assistants",
+		"init",
+		"apply",
+		"install",
+		"uninstall",
+	} {
+		if !strings.Contains(output.String(), want) {
+			t.Errorf("help output missing %q:\n%s", want, output.String())
 		}
 	}
-	
-	if !versionFlag {
-		t.Error("New() should have --version flag")
+}
+
+func TestNew_VersionFlagsPrintVersionAndCommit(t *testing.T) {
+	for _, argument := range []string{"-v", "--version"} {
+		t.Run(argument, func(t *testing.T) {
+			app := New("1.0.0", "abc123")
+			var output bytes.Buffer
+			app.Writer = &output
+
+			if err := app.Run([]string{"skill", argument}); err != nil {
+				t.Fatalf("Run(%s) returned error: %v", argument, err)
+			}
+
+			want := "skill-manager version 1.0.0 (commit abc123)"
+			if got := output.String(); got != want+"\n" {
+				t.Errorf("Run(%s) output = %q, want %q", argument, got, want+"\n")
+			}
+		})
+	}
+}
+
+func TestNew_RegistersCommands(t *testing.T) {
+	app := New("1.0.0", "abc123")
+	got := make(map[string]bool, len(app.Commands))
+	for _, command := range app.Commands {
+		got[command.Name] = true
+	}
+
+	for _, want := range []string{"init", "apply", "install", "uninstall"} {
+		if !got[want] {
+			t.Errorf("New() commands missing %q", want)
+		}
 	}
 }
