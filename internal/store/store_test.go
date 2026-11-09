@@ -181,3 +181,61 @@ func assertLinkTarget(t *testing.T, linkPath, wantTarget string) {
 		t.Errorf("link target = %q, want %q", gotTarget, wantTarget)
 	}
 }
+
+func TestUnlinkManagedSkillRemovesOnlyManagedSymlink(t *testing.T) {
+	root := t.TempDir()
+	storePath := writeSkill(t, root, "store/example", map[string]string{"SKILL.md": "# Example\n"})
+	otherPath := writeSkill(t, root, "other/example", map[string]string{"SKILL.md": "# Other\n"})
+
+	managedLink := filepath.Join(root, "agent", "managed")
+	unownedLink := filepath.Join(root, "agent", "unowned")
+	regularFile := filepath.Join(root, "agent", "regular")
+	if err := os.MkdirAll(filepath.Dir(managedLink), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(storePath, managedLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(otherPath, unownedLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(regularFile, []byte("user-owned"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := UnlinkManagedSkill(storePath, managedLink)
+	if err != nil || !removed {
+		t.Fatalf("UnlinkManagedSkill(managed) = (%v, %v), want (true, nil)", removed, err)
+	}
+	if _, err := os.Lstat(managedLink); !os.IsNotExist(err) {
+		t.Fatalf("managed link error = %v, want removed", err)
+	}
+
+	for _, path := range []string{unownedLink, regularFile, filepath.Join(root, "agent", "missing")} {
+		removed, err := UnlinkManagedSkill(storePath, path)
+		if err != nil || removed {
+			t.Fatalf("UnlinkManagedSkill(%q) = (%v, %v), want (false, nil)", path, removed, err)
+		}
+	}
+	if _, err := os.Lstat(unownedLink); err != nil {
+		t.Fatalf("unowned link should remain: %v", err)
+	}
+	if contents, err := os.ReadFile(regularFile); err != nil || string(contents) != "user-owned" {
+		t.Fatalf("regular file should remain, got %q, %v", contents, err)
+	}
+}
+
+func TestRemoveSkillRemovesStoreAndIgnoresMissingPath(t *testing.T) {
+	root := t.TempDir()
+	storePath := writeSkill(t, root, "store/example", map[string]string{"SKILL.md": "# Example\n"})
+
+	if err := RemoveSkill(storePath); err != nil {
+		t.Fatalf("RemoveSkill() error = %v", err)
+	}
+	if _, err := os.Lstat(storePath); !os.IsNotExist(err) {
+		t.Fatalf("store path error = %v, want removed", err)
+	}
+	if err := RemoveSkill(storePath); err != nil {
+		t.Fatalf("RemoveSkill() on missing path error = %v", err)
+	}
+}

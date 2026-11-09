@@ -51,15 +51,57 @@ func LinkSkill(storePath, linkPath string) (bool, error) {
 }
 
 func linkPointsTo(linkPath, storePath string) (bool, error) {
-	resolvedLink, err := filepath.EvalSymlinks(linkPath)
+	target, err := os.Readlink(linkPath)
 	if err != nil {
-		return false, fmt.Errorf("resolve managed link: %w", err)
+		return false, fmt.Errorf("read managed link: %w", err)
 	}
-	resolvedStore, err := filepath.EvalSymlinks(storePath)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(linkPath), target)
+	}
+	resolvedTarget, err := filepath.Abs(filepath.Clean(target))
 	if err != nil {
-		return false, fmt.Errorf("resolve stored skill: %w", err)
+		return false, fmt.Errorf("resolve link target: %w", err)
 	}
-	return resolvedLink == resolvedStore, nil
+	resolvedStore, err := filepath.Abs(filepath.Clean(storePath))
+	if err != nil {
+		return false, fmt.Errorf("resolve stored skill path: %w", err)
+	}
+	return resolvedTarget == resolvedStore, nil
+}
+
+// UnlinkManagedSkill removes linkPath only when it is a symbolic link to
+// storePath. Missing paths and user-owned entries are left unchanged.
+func UnlinkManagedSkill(storePath, linkPath string) (bool, error) {
+	info, err := os.Lstat(linkPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect link for removal: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		return false, nil
+	}
+	matches, err := linkPointsTo(linkPath, storePath)
+	if err != nil {
+		return false, err
+	}
+	if !matches {
+		return false, nil
+	}
+	if err := os.Remove(linkPath); err != nil {
+		return false, fmt.Errorf("remove managed link: %w", err)
+	}
+	return true, nil
+}
+
+// RemoveSkill removes a central-store skill directory. A missing store path is
+// already removed and therefore succeeds.
+func RemoveSkill(storePath string) error {
+	if err := os.RemoveAll(storePath); err != nil {
+		return fmt.Errorf("remove stored skill: %w", err)
+	}
+	return nil
 }
 
 // StoreSkill copies sourcePath to destinationPath when their directory trees
