@@ -3,6 +3,8 @@ package app
 import (
 	"fmt"
 
+	"github.com/ansidev/skill-manager-cli/internal/config"
+
 	"github.com/urfave/cli/v2"
 )
 
@@ -13,7 +15,13 @@ func New(versionStr, commitStr string) *cli.App {
 		Usage:   "Manage agent skills for coding assistants",
 		Version: fmt.Sprintf("%s (commit %s)", versionStr, commitStr),
 		Commands: []*cli.Command{
-			{Name: "init"},
+			{Name: "init", Action: func(c *cli.Context) error {
+				if err := config.WriteExample("config.yaml"); err != nil {
+					return err
+				}
+				fmt.Println("created config.yaml")
+				return nil
+			}},
 			{Name: "apply"},
 			{Name: "install"},
 			{Name: "uninstall"},
