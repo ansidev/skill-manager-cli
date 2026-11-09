@@ -4,6 +4,8 @@ package skilldirs
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/ansidev/skill-manager-cli/internal/config"
@@ -30,6 +32,7 @@ func Resolve(skillDirsFlag, agentsFlag string, cfg *config.Config) ([]string, er
 			if p == "" {
 				return nil, fmt.Errorf("invalid empty path entry")
 			}
+			p = expandHome(p)
 			paths = append(paths, p)
 		}
 		return dedup(paths), nil
@@ -42,7 +45,7 @@ func Resolve(skillDirsFlag, agentsFlag string, cfg *config.Config) ([]string, er
 		out := make([]string, 0, len(keys))
 		for _, k := range keys {
 			if v := strings.TrimSpace(cfg.Dirs[k]); v != "" {
-				out = append(out, v)
+				out = append(out, expandHome(v))
 			}
 		}
 		return dedup(out), nil
@@ -58,7 +61,7 @@ func Resolve(skillDirsFlag, agentsFlag string, cfg *config.Config) ([]string, er
 		if dir == "" {
 			return nil, fmt.Errorf("agent %q has empty skill directory", a)
 		}
-		out = append(out, dir)
+		out = append(out, expandHome(dir))
 	}
 	return dedup(out), nil
 }
@@ -78,6 +81,22 @@ func ParseSkillDirs(skillDirsFlag, agentsFlag string, cfg *config.Config) ([]str
 }
 func ResolveDirs(skillDirsFlag, agentsFlag string, cfg *config.Config) ([]string, error) {
 	return Resolve(skillDirsFlag, agentsFlag, cfg)
+}
+
+func expandHome(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }
 
 func splitComma(s string) []string {

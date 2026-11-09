@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/ansidev/skill-manager-cli/internal/config"
-	"github.com/ansidev/skill-manager-cli/internal/skilldirs"
 	"github.com/ansidev/skill-manager-cli/internal/source"
 	"github.com/ansidev/skill-manager-cli/internal/store"
 	"github.com/ansidev/skill-manager-cli/internal/targetdirs"
@@ -90,6 +89,7 @@ func applyCommand() *cli.Command {
 
 func apply(c *cli.Context) error {
 	logger := commandLogger(c, c.Bool("debug"))
+	logger.Info("starting apply")
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
 		return fmt.Errorf("load config.yaml: %w", err)
@@ -175,6 +175,7 @@ func apply(c *cli.Context) error {
 	}
 
 	failed := logSummary(logger, "apply", outcomes)
+	logger.Info("finished apply", "operations", len(outcomes), "failed", failed)
 	if failed > 0 {
 		return fmt.Errorf("apply completed with %d failed operation(s)", failed)
 	}
@@ -333,7 +334,7 @@ func install(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	targets, err := skilldirs.Resolve(opts.skillDirs, opts.agents, cfg)
+	targets, err := targetdirs.Resolve(opts.skillDirs, opts.agents, cfg)
 	if err != nil {
 		return err
 	}
@@ -449,7 +450,7 @@ func uninstall(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	targets, err := skilldirs.Resolve(opts.skillDirs, opts.agents, cfg)
+	targets, err := targetdirs.Resolve(opts.skillDirs, opts.agents, cfg)
 	if err != nil {
 		return err
 	}
