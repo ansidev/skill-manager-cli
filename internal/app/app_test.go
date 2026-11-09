@@ -333,3 +333,125 @@ func TestInstallRequiresRepositoryAndSkill(t *testing.T) {
 		t.Fatal("install without repository and skill returned nil error")
 	}
 }
+
+func TestInstallHonorsConfirmation(t *testing.T) {
+	repository := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repository, "skills", "hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	target := filepath.Join(t.TempDir(), "target")
+
+	app := New("1.0.0", "abc123")
+	var output bytes.Buffer
+	app.Writer = &output
+	app.Reader = strings.NewReader("n\n")
+	err := app.Run([]string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", target})
+	if err == nil {
+		t.Fatalf("declined confirmation returned nil error\n%s", output.String())
+	}
+	if _, statErr := os.Lstat(filepath.Join(target, "hello")); !os.IsNotExist(statErr) {
+		t.Fatalf("declined install created a link: %v", statErr)
+	}
+}
+
+func TestUninstallPreservesUserOwnedTargetAndStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	storePath := filepath.Join(home, ".agents", "skills", "hello")
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "target")
+	userPath := filepath.Join(target, "hello")
+	if err := os.MkdirAll(userPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	app := New("1.0.0", "abc123")
+	if err := app.Run([]string{"skill", "uninstall", "--skill", "hello", "--skill-dirs", target, "-y"}); err != nil {
+		t.Fatalf("uninstall returned error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(userPath, "..")); err != nil {
+		t.Fatalf("user-owned target parent removed: %v", err)
+	}
+	if info, err := os.Stat(userPath); err != nil || !info.IsDir() {
+		t.Fatalf("user-owned target was not preserved: info=%v err=%v", info, err)
+	}
+	if _, err := os.Stat(storePath); err != nil {
+		t.Fatalf("store entry removed despite no managed link: %v", err)
+	}
+}
+
+func TestInstallRejectsTraversalSkillName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	app := New("1.0.0", "abc123")
+	if err := app.Run([]string{"skill", "install", "--repo", t.TempDir(), "--provider-type", "local", "--skill", "../escape", "--skill-dirs", t.TempDir(), "-y"}); err == nil {
+		t.Fatal("traversal skill name returned nil error")
+	}
+}
+
+func TestInstallFallsBackToConfig(t *testing.T) {
+	repository := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repository, "skills", "hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	target := filepath.Join(t.TempDir(), "target")
+	t.Chdir(t.TempDir())
+	cfg := "dirs:\n  pi: " + target + "\nskills:\n  - repo: " + repository + "\n    provider:\n      type: local\n    skills:\n      - name: hello\n"
+	if err := os.WriteFile("config.yaml", []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	app := New("1.0.0", "abc123")
+	if err := app.Run([]string{"skill", "install", "-y"}); err != nil {
+		t.Fatalf("install using config defaults returned error: %v", err)
+	}
+	if info, err := os.Lstat(filepath.Join(target, "hello")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("config-driven install did not link: info=%v err=%v", info, err)
+	}
+}
+
+func TestUninstallDryRunDoesNotMutate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	storePath := filepath.Join(home, ".agents", "skills", "hello")
+	if err := os.MkdirAll(storePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	linkPath := filepath.Join(target, "hello")
+	if err := os.Symlink(storePath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	app := New("1.0.0", "abc123")
+	if err := app.Run([]string{"skill", "uninstall", "--skill", "hello", "--skill-dirs", target, "--dry-run"}); err != nil {
+		t.Fatalf("uninstall dry-run returned error: %v", err)
+	}
+	if _, err := os.Lstat(linkPath); err != nil {
+		t.Fatalf("dry-run removed the link: %v", err)
+	}
+	if _, err := os.Stat(storePath); err != nil {
+		t.Fatalf("dry-run removed the store entry: %v", err)
+	}
+}
+
+func TestDebugFlagEmitsDebugLogs(t *testing.T) {
+	repository := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repository, "skills", "hello"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+
+	app := New("1.0.0", "abc123")
+	var output bytes.Buffer
+	app.Writer = &output
+	if err := app.Run([]string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", t.TempDir(), "--dry-run", "-d"}); err != nil {
+		t.Fatalf("install returned error: %v", err)
+	}
+	if !strings.Contains(output.String(), "level=DEBUG") {
+		t.Fatalf("expected debug logs, got:\n%s", output.String())
+	}
+}
