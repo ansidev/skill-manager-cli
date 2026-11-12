@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ansidev/skill-manager-cli/internal/config"
+	"github.com/ansidev/skill-manager-cli/internal/source"
 )
 
 func TestNew(t *testing.T) {
@@ -210,6 +212,8 @@ func TestApplyUninstallsMissingSourceSkill(t *testing.T) {
 	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+target+"\nskills:\n  - repo: "+repository+"\n    provider:\n      type: local\n    skills:\n      - name: example\n        state: uninstalled\n")
 
 	app := New("dev", "test")
+	var output bytes.Buffer
+	app.Writer = &output
 	if err := app.Run([]string{"skill", "apply", "--yes", "--agents", "pi"}); err != nil {
 		t.Fatalf("apply returned error: %v", err)
 	}
@@ -241,15 +245,10 @@ func TestApplyContinuesAfterSkillSelectionFailure(t *testing.T) {
 		t.Fatalf("valid skill was not applied after independent failure: %v", err)
 	}
 	assertOutputContains(t, output.String(),
-		"operation=apply",
-		"skill=missing",
-		"action=failed",
-		"error=",
-		"skill=valid",
-		"action=installed",
-		"msg=summary",
-		"operations=2",
-		"failed=1",
+		"Skills installed",
+		"missing (failed:",
+		"valid (installed)",
+		"Completed 2 operation(s); 1 failed.",
 	)
 }
 
@@ -299,7 +298,6 @@ func TestInstallThenUninstallLocalSkill(t *testing.T) {
 	if err := app.Run([]string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", target, "-y"}); err != nil {
 		t.Fatalf("install returned error: %v\n%s", err, output.String())
 	}
-
 	storePath := filepath.Join(home, ".agents", "skills", "hello")
 	if _, err := os.Stat(filepath.Join(storePath, "SKILL.md")); err != nil {
 		t.Fatalf("stored skill missing: %v", err)
@@ -453,7 +451,50 @@ func TestUninstallDryRunDoesNotMutate(t *testing.T) {
 	}
 }
 
-func TestDebugFlagEmitsDebugLogs(t *testing.T) {
+func TestObtainRepositoriesClonesConcurrently(t *testing.T) {
+	runner := &blockingCloneRunner{entered: make(chan struct{}, 2), release: make(chan struct{})}
+	repositories := []applyRepository{
+		{repository: config.Repository{Repo: "first", Provider: &config.Provider{Type: "github"}}, entriesToResolve: []config.SkillEntry{{Name: "alpha"}}},
+		{repository: config.Repository{Repo: "second", Provider: &config.Provider{Type: "github"}}, entriesToResolve: []config.SkillEntry{{Name: "beta"}}},
+	}
+	done := make(chan struct{})
+	go func() {
+		obtainRepositories(&source.Resolver{Runner: runner}, repositories, nil)
+		close(done)
+	}()
+
+	for range 2 {
+		select {
+		case <-runner.entered:
+		case <-time.After(time.Second):
+			close(runner.release)
+			t.Fatal("expected both repository clones to start before either completed")
+		}
+	}
+	close(runner.release)
+	<-done
+	for _, repository := range repositories {
+		if repository.workspace == nil {
+			t.Fatalf("repository %q did not get a workspace", repository.repository.Repo)
+		}
+		if err := repository.workspace.Cleanup(); err != nil {
+			t.Errorf("cleanup %q workspace: %v", repository.repository.Repo, err)
+		}
+	}
+}
+
+type blockingCloneRunner struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingCloneRunner) Run(string, ...string) ([]byte, []byte, error) {
+	r.entered <- struct{}{}
+	<-r.release
+	return nil, nil, nil
+}
+
+func TestCommandsDoNotEmitStructuredSlogOutput(t *testing.T) {
 	repository := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(repository, "skills", "hello"), 0o755); err != nil {
 		t.Fatal(err)
@@ -466,8 +507,8 @@ func TestDebugFlagEmitsDebugLogs(t *testing.T) {
 	if err := app.Run([]string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", t.TempDir(), "--dry-run", "-d"}); err != nil {
 		t.Fatalf("install returned error: %v", err)
 	}
-	if !strings.Contains(output.String(), "level=DEBUG") {
-		t.Fatalf("expected debug logs, got:\n%s", output.String())
+	if strings.Contains(output.String(), "time=") || strings.Contains(output.String(), "level=") || strings.Contains(output.String(), "msg=") {
+		t.Fatalf("unexpected structured slog output:\n%s", output.String())
 	}
 }
 
@@ -509,17 +550,9 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 	assertLinkTarget(t, filepath.Join(namedTarget, "alpha"), filepath.Join(storeRoot, "alpha"))
 	assertFileExists(t, filepath.Join(storeRoot, "alpha", "SKILL.md"))
 	assertOutputContains(t, output.String(),
-		"operation=install",
-		"skill=alpha",
-		"action=installed",
-		"repository="+repository,
-		"source="+repository,
-		"path=skills/alpha",
-		"targets="+namedTarget,
-		"dry_run=false",
-		"msg=summary",
-		"operations=1",
-		"failed=0",
+		"Skills installed",
+		"alpha (installed)",
+		"Completed 1 operation(s); 0 failed.",
 	)
 
 	output.Reset()
@@ -529,12 +562,9 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 	assertPathMissing(t, filepath.Join(namedTarget, "alpha"))
 	assertPathMissing(t, filepath.Join(storeRoot, "alpha"))
 	assertOutputContains(t, output.String(),
-		"operation=uninstall",
-		"skill=alpha",
-		"action=uninstalled",
-		"dry_run=false",
-		"msg=summary",
-		"failed=0",
+		"Skills uninstalled",
+		"alpha (uninstalled)",
+		"Completed 1 operation(s); 0 failed.",
 	)
 
 	writeLifecycleConfig(t, repository, namedTarget, wildcardTarget, "      - name: \"*\"\n")
@@ -547,16 +577,10 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 		assertPathMissing(t, filepath.Join(wildcardTarget, skill))
 	}
 	assertOutputContains(t, output.String(),
-		"operation=apply",
-		"skill=alpha",
-		"skill=beta",
-		"action=installed",
-		"path=skills/alpha",
-		"path=skills/beta",
-		"dry_run=true",
-		"msg=summary",
-		"operations=2",
-		"failed=0",
+		"Skills installed",
+		"alpha (installed)",
+		"beta (installed)",
+		"Completed 2 operation(s); 0 failed.",
 	)
 
 	output.Reset()
@@ -569,13 +593,10 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 		assertFileExists(t, filepath.Join(storeRoot, skill, "SKILL.md"))
 	}
 	assertOutputContains(t, output.String(),
-		"operation=apply",
-		"skill=alpha",
-		"skill=beta",
-		"action=installed",
-		"dry_run=false",
-		"operations=2",
-		"failed=0",
+		"Skills installed",
+		"alpha (installed)",
+		"beta (installed)",
+		"Completed 2 operation(s); 0 failed.",
 	)
 
 	writeLifecycleConfig(t, repository, namedTarget, wildcardTarget, "      - name: beta\n        state: uninstalled\n")
@@ -587,12 +608,9 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 	assertPathMissing(t, filepath.Join(storeRoot, "beta"))
 	assertLinkTarget(t, filepath.Join(wildcardTarget, "alpha"), filepath.Join(storeRoot, "alpha"))
 	assertOutputContains(t, output.String(),
-		"operation=apply",
-		"skill=beta",
-		"action=uninstalled",
-		"dry_run=false",
-		"operations=1",
-		"failed=0",
+		"Skills uninstalled",
+		"beta (uninstalled)",
+		"Completed 1 operation(s); 0 failed.",
 	)
 }
 
@@ -615,11 +633,9 @@ func TestInstallSummaryReportsSkippedOnRepeat(t *testing.T) {
 		t.Fatalf("repeat install returned error: %v\n%s", err, output.String())
 	}
 	assertOutputContains(t, output.String(),
-		"operation=install",
-		"skill=hello",
-		"action=skipped",
-		"msg=summary",
-		"failed=0",
+		"Skills installed",
+		"hello (skipped)",
+		"Completed 1 operation(s); 0 failed.",
 	)
 }
 
@@ -635,11 +651,9 @@ func TestUninstallSummaryReportsSkippedWhenNothingManaged(t *testing.T) {
 		t.Fatalf("uninstall of absent skill returned error: %v\n%s", err, output.String())
 	}
 	assertOutputContains(t, output.String(),
-		"operation=uninstall",
-		"skill=absent",
-		"action=skipped",
-		"msg=summary",
-		"failed=0",
+		"Skills uninstalled",
+		"absent (skipped)",
+		"Completed 1 operation(s); 0 failed.",
 	)
 }
 

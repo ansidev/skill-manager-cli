@@ -9,13 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/ansidev/skill-manager-cli/internal/config"
 	"github.com/ansidev/skill-manager-cli/internal/source"
 	"github.com/ansidev/skill-manager-cli/internal/store"
 	"github.com/ansidev/skill-manager-cli/internal/targetdirs"
-
 	"github.com/urfave/cli/v2"
+	"github.com/vbauerster/mpb/v8"
+	"github.com/vbauerster/mpb/v8/decor"
 )
 
 const defaultConfigPath = "config.yaml"
@@ -72,6 +74,87 @@ type operationOutcome struct {
 	Err        error
 }
 
+type applyRepository struct {
+	repository       config.Repository
+	provider         config.Provider
+	sourceLocation   string
+	namedUninstalls  []config.SkillEntry
+	entriesToResolve []config.SkillEntry
+	workspace        *source.Workspace
+	obtainErr        error
+	progressBar      *mpb.Bar
+}
+
+type taskProgress struct {
+	bars     *mpb.Progress
+	waitOnce sync.Once
+}
+
+func newTaskProgress(writer io.Writer) *taskProgress {
+	return &taskProgress{bars: mpb.New(mpb.WithOutput(writer))}
+}
+
+func (p *taskProgress) add(label string, after *mpb.Bar) *mpb.Bar {
+	return p.addTask(label, after, false)
+}
+
+func (p *taskProgress) addSpinner(label string, after *mpb.Bar) *mpb.Bar {
+	return p.addTask(label, after, true)
+}
+
+func (p *taskProgress) addTask(label string, after *mpb.Bar, spinner bool) *mpb.Bar {
+	if p == nil || p.bars == nil {
+		return nil
+	}
+	options := []mpb.BarOption{
+		mpb.PrependDecorators(decor.Name(label)),
+		mpb.AppendDecorators(decor.OnComplete(decor.Percentage(), "done")),
+	}
+	if after != nil {
+		options = append(options, mpb.BarQueueAfter(after), mpb.BarFillerClearOnComplete())
+	}
+	if spinner {
+		return p.bars.AddSpinner(1, options...)
+	}
+	return p.bars.AddBar(1, options...)
+}
+
+func (p *taskProgress) wait() {
+	if p != nil && p.bars != nil {
+		p.waitOnce.Do(p.bars.Wait)
+	}
+}
+
+func completeTask(bar *mpb.Bar) {
+	if bar != nil {
+		bar.Increment()
+	}
+}
+
+func abortTasks(bars []*mpb.Bar) {
+	for _, bar := range bars {
+		if bar != nil {
+			bar.Abort(true)
+		}
+	}
+}
+
+func symlinkTaskBars(progress *taskProgress, targets []string, skillName string, after *mpb.Bar) []*mpb.Bar {
+	bars := make([]*mpb.Bar, 0, len(targets))
+	for _, target := range targets {
+		after = progress.add("Create symlink: "+filepath.Join(target, skillName), after)
+		bars = append(bars, after)
+	}
+	return bars
+}
+
+func lastTaskBar(bars []*mpb.Bar, fallback *mpb.Bar) *mpb.Bar {
+	if len(bars) == 0 {
+		return fallback
+	}
+	return bars[len(bars)-1]
+}
+
 func applyCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "apply",
@@ -109,53 +192,61 @@ func apply(c *cli.Context) error {
 		return err
 	}
 	outcomes := make([]operationOutcome, 0)
+	progress := newTaskProgress(commandWriter(c))
+	defer progress.wait()
 	resolver := source.NewResolver()
-	for _, repository := range cfg.Skills {
+	repositories := make([]applyRepository, len(cfg.Skills))
+	for i, repository := range cfg.Skills {
 		provider := repository.EffectiveProvider()
-		sourceLocation := repositorySource(repository.Repo, provider)
-		namedUninstalls := make([]config.SkillEntry, 0)
-		entriesToResolve := make([]config.SkillEntry, 0, len(repository.Skills))
+		prepared := applyRepository{
+			repository:     repository,
+			provider:       provider,
+			sourceLocation: repositorySource(repository.Repo, provider),
+		}
 		for _, entry := range repository.Skills {
-			// Uninstalling a named skill does not require discovering it in a
-			// source workspace, so keep it outside both acquisition and
-			// path-resolution validation handled below.
+			// A named uninstall does not need a repository workspace.
 			if entry.State == "uninstalled" && entry.Name != "*" {
-				namedUninstalls = append(namedUninstalls, entry)
-				continue
+				prepared.namedUninstalls = append(prepared.namedUninstalls, entry)
+			} else {
+				prepared.entriesToResolve = append(prepared.entriesToResolve, entry)
 			}
-			entriesToResolve = append(entriesToResolve, entry)
 		}
-		for _, entry := range namedUninstalls {
-			outcomes = append(outcomes, applySkill(logger, c, storeRoot, targets, repository.Repo, sourceLocation, config.JoinBase(entry.BasePath, entry.Name), source.ResolvedSkill{Entry: entry}))
+		repositories[i] = prepared
+	}
+	for i := range repositories {
+		for _, entry := range repositories[i].namedUninstalls {
+			outcome, _ := applySkill(logger, c, storeRoot, targets, repositories[i].repository.Repo, repositories[i].sourceLocation, config.JoinBase(entry.BasePath, entry.Name), source.ResolvedSkill{Entry: entry}, progress, nil)
+			outcomes = append(outcomes, outcome)
 		}
-		if len(entriesToResolve) == 0 {
+	}
+
+	obtainRepositories(resolver, repositories, progress)
+
+	for _, prepared := range repositories {
+		repository := prepared.repository
+		if len(prepared.entriesToResolve) == 0 {
 			continue
 		}
-
-		fmt.Fprintf(commandWriter(c), "%s: Cloning...\n", repository.Repo)
-		workspace, err := resolver.Obtain(repository.Repo, provider)
-		if err != nil {
-			fmt.Fprintf(commandWriter(c), "%s: Failed to clone: %v\n", repository.Repo, err)
+		if prepared.obtainErr != nil {
 			outcomes = append(outcomes, operationOutcome{
 				Operation:  "apply",
 				Action:     actionFailed,
 				Repository: repository.Repo,
-				Source:     sourceLocation,
+				Source:     prepared.sourceLocation,
 				Targets:    targets,
 				DryRun:     c.Bool("dry-run"),
-				Err:        err,
+				Err:        prepared.obtainErr,
 			})
 			continue
 		}
-		fmt.Fprintf(commandWriter(c), "%s: Cloned to %s\n", repository.Repo, workspace.Path)
-		resolution := source.ResolveSkills(workspace.Path, entriesToResolve)
+		resolution := source.ResolveSkills(prepared.workspace.Path, prepared.entriesToResolve)
 		for _, failure := range resolution.Failures {
 			outcomes = append(outcomes, operationOutcome{
 				Operation:  "apply",
 				Skill:      failure.Entry.Name,
 				Action:     actionFailed,
 				Repository: repository.Repo,
-				Source:     sourceLocation,
+				Source:     prepared.sourceLocation,
 				Path:       config.JoinBase(failure.Entry.BasePath, failure.Entry.Name),
 				Targets:    targets,
 				DryRun:     c.Bool("dry-run"),
@@ -163,14 +254,16 @@ func apply(c *cli.Context) error {
 			})
 		}
 		for _, skill := range resolution.Skills {
-			outcomes = append(outcomes, applySkill(logger, c, storeRoot, targets, repository.Repo, sourceLocation, relativeRepositoryPath(workspace.Path, skill.Path), skill))
+			outcome, lastBar := applySkill(logger, c, storeRoot, targets, repository.Repo, prepared.sourceLocation, relativeRepositoryPath(prepared.workspace.Path, skill.Path), skill, progress, prepared.progressBar)
+			prepared.progressBar = lastBar
+			outcomes = append(outcomes, outcome)
 		}
-		if err := workspace.Cleanup(); err != nil {
+		if err := prepared.workspace.Cleanup(); err != nil {
 			outcomes = append(outcomes, operationOutcome{
 				Operation:  "apply",
 				Action:     actionFailed,
 				Repository: repository.Repo,
-				Source:     sourceLocation,
+				Source:     prepared.sourceLocation,
 				Targets:    targets,
 				DryRun:     c.Bool("dry-run"),
 				Err:        fmt.Errorf("clean workspace: %w", err),
@@ -178,7 +271,8 @@ func apply(c *cli.Context) error {
 		}
 	}
 
-	failed := logSummary(logger, "apply", outcomes)
+	progress.wait()
+	failed := logSummary(commandWriter(c), "apply", outcomes)
 	logger.Info("finished apply", "operations", len(outcomes), "failed", failed)
 	if failed > 0 {
 		return fmt.Errorf("apply completed with %d failed operation(s)", failed)
@@ -186,7 +280,62 @@ func apply(c *cli.Context) error {
 	return nil
 }
 
-func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets []string, repository, sourceLocation, inRepoPath string, skill source.ResolvedSkill) operationOutcome {
+func obtainRepositories(resolver *source.Resolver, repositories []applyRepository, progress *taskProgress) {
+	remote := make([]int, 0)
+	for i := range repositories {
+		if len(repositories[i].entriesToResolve) == 0 {
+			continue
+		}
+		if repositories[i].provider.Type == "local" {
+			repositories[i].workspace, repositories[i].obtainErr = resolver.Obtain(repositories[i].repository.Repo, repositories[i].provider)
+		} else {
+			remote = append(remote, i)
+		}
+	}
+	if len(remote) == 0 {
+		return
+	}
+
+	const maxConcurrentClones = 4
+	workerCount := min(len(remote), maxConcurrentClones)
+	jobs := make(chan int, len(remote))
+	results := make(chan struct {
+		index     int
+		workspace *source.Workspace
+		err       error
+	}, len(remote))
+	for _, index := range remote {
+		repositories[index].progressBar = progress.addSpinner("Clone repo: "+repositories[index].repository.Repo, nil)
+		jobs <- index
+	}
+	close(jobs)
+
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				repository := repositories[index]
+				workspace, err := resolver.Obtain(repository.repository.Repo, repository.provider)
+				completeTask(repository.progressBar)
+				results <- struct {
+					index     int
+					workspace *source.Workspace
+					err       error
+				}{index: index, workspace: workspace, err: err}
+			}
+		}()
+	}
+	for range len(remote) {
+		result := <-results
+		repositories[result.index].workspace = result.workspace
+		repositories[result.index].obtainErr = result.err
+	}
+	workers.Wait()
+}
+
+func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets []string, repository, sourceLocation, inRepoPath string, skill source.ResolvedSkill, progress *taskProgress, after *mpb.Bar) (operationOutcome, *mpb.Bar) {
 	outcome := operationOutcome{
 		Operation:  "apply",
 		Skill:      skill.Entry.Name,
@@ -199,7 +348,7 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 	if !validSkillName(skill.Entry.Name) {
 		outcome.Action = actionFailed
 		outcome.Err = fmt.Errorf("invalid skill name %q", skill.Entry.Name)
-		return outcome
+		return outcome, after
 	}
 	storePath := filepath.Join(storeRoot, skill.Entry.Name)
 	for _, target := range targets {
@@ -207,57 +356,57 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 		if err := validateScopedPath(storeRoot, storePath, target, targetPath); err != nil {
 			outcome.Action = actionFailed
 			outcome.Err = err
-			return outcome
+			return outcome, after
 		}
 	}
-	writer := commandWriter(c)
 	logger.Debug("evaluating configured skill", "skill", skill.Entry.Name, "repository", repository, "path", inRepoPath)
 	if outcome.DryRun {
 		outcome.Action = actionForState(skill.Entry.State)
 		logger.Info("dry-run: planned skill operation", "skill", skill.Entry.Name, "action", outcome.Action, "targets", strings.Join(targets, ","))
-		return outcome
+		return outcome, after
 	}
 	if skill.Entry.State == "uninstalled" {
-		fmt.Fprintf(writer, "  %s: Uninstalling...\n", skill.Entry.Name)
-		removed, err := unlinkTargets(logger, writer, storePath, skill.Entry.Name, targets)
+		removed, err := unlinkTargets(logger, storePath, skill.Entry.Name, targets)
 		if err != nil {
 			outcome.Action = actionFailed
 			outcome.Err = err
-			return outcome
+			return outcome, after
 		}
 		if !removed {
 			outcome.Action = actionSkipped
-			return outcome
+			return outcome, after
 		}
 		if err := store.RemoveSkill(storePath); err != nil {
 			outcome.Action = actionFailed
 			outcome.Err = err
-			return outcome
+			return outcome, after
 		}
-		fmt.Fprintf(writer, "    Removed from %s\n", storePath)
 		outcome.Action = actionUninstalled
-		return outcome
+		return outcome, after
 	}
-	fmt.Fprintf(writer, "  %s: Installing...\n", skill.Entry.Name)
+	installBar := progress.add("Install skill: "+skill.Entry.Name, after)
+	symlinkBars := symlinkTaskBars(progress, targets, skill.Entry.Name, installBar)
+	lastBar := lastTaskBar(symlinkBars, installBar)
 	storeChanged, err := store.StoreSkill(skill.Path, storePath)
+	completeTask(installBar)
 	if err != nil {
+		abortTasks(symlinkBars)
 		outcome.Action = actionFailed
 		outcome.Err = err
-		return outcome
+		return outcome, lastBar
 	}
-	fmt.Fprintf(writer, "    Installed to %s\n", storePath)
-	linkChanged, err := linkTargets(logger, writer, storePath, skill.Entry.Name, targets)
+	linkChanged, err := linkTargets(logger, storePath, skill.Entry.Name, targets, symlinkBars)
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = err
-		return outcome
+		return outcome, lastBar
 	}
 	if storeChanged || linkChanged {
 		outcome.Action = actionInstalled
 	} else {
 		outcome.Action = actionSkipped
 	}
-	return outcome
+	return outcome, lastBar
 }
 
 func validSkillName(name string) bool {
@@ -409,9 +558,17 @@ func install(c *cli.Context) error {
 	provider := repository.EffectiveProvider()
 	sourceLocation := repositorySource(repository.Repo, provider)
 	basePath := config.JoinBase(entry.BasePath, entry.Name)
+	progress := newTaskProgress(commandWriter(c))
+	defer progress.wait()
+	var lastBar *mpb.Bar
+	if provider.Type != "local" {
+		lastBar = progress.addSpinner("Clone repo: "+repository.Repo, nil)
+	}
 	workspace, err := source.Obtain(repository.Repo, provider)
+	completeTask(lastBar)
 	if err != nil {
-		logSummary(logger, "install", []operationOutcome{{
+		progress.wait()
+		logSummary(commandWriter(c), "install", []operationOutcome{{
 			Operation:  "install",
 			Action:     actionFailed,
 			Repository: repository.Repo,
@@ -447,9 +604,12 @@ func install(c *cli.Context) error {
 		})
 	}
 	for _, resolved := range resolution.Skills {
-		outcomes = append(outcomes, installSkill(logger, opts, storeRoot, targets, repository.Repo, sourceLocation, relativeRepositoryPath(workspace.Path, resolved.Path), resolved))
+		outcome, nextBar := installSkill(logger, opts, storeRoot, targets, repository.Repo, sourceLocation, relativeRepositoryPath(workspace.Path, resolved.Path), resolved, progress, lastBar)
+		lastBar = nextBar
+		outcomes = append(outcomes, outcome)
 	}
-	failed := logSummary(logger, "install", outcomes)
+	progress.wait()
+	failed := logSummary(commandWriter(c), "install", outcomes)
 	if failed > 0 {
 		return fmt.Errorf("install completed with %d failed operation(s)", failed)
 	}
@@ -457,7 +617,7 @@ func install(c *cli.Context) error {
 	return nil
 }
 
-func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, targets []string, repository, sourceLocation, inRepoPath string, resolved source.ResolvedSkill) operationOutcome {
+func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, targets []string, repository, sourceLocation, inRepoPath string, resolved source.ResolvedSkill, progress *taskProgress, after *mpb.Bar) (operationOutcome, *mpb.Bar) {
 	outcome := operationOutcome{
 		Operation:  "install",
 		Skill:      resolved.Entry.Name,
@@ -475,27 +635,32 @@ func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, ta
 		for _, target := range targets {
 			logger.Info("dry-run: would link skill", "skill", resolved.Entry.Name, "target", filepath.Join(target, resolved.Entry.Name))
 		}
-		return outcome
+		return outcome, after
 	}
+	installBar := progress.add("Install skill: "+resolved.Entry.Name, after)
+	symlinkBars := symlinkTaskBars(progress, targets, resolved.Entry.Name, installBar)
+	lastBar := lastTaskBar(symlinkBars, installBar)
 	storeChanged, err := store.StoreSkill(resolved.Path, storePath)
+	completeTask(installBar)
 	if err != nil {
+		abortTasks(symlinkBars)
 		outcome.Action = actionFailed
 		outcome.Err = fmt.Errorf("store skill %q: %w", resolved.Entry.Name, err)
-		return outcome
+		return outcome, lastBar
 	}
 	logger.Debug("copy decision complete", "skill", resolved.Entry.Name, "changed", storeChanged)
-	linkChanged, err := linkTargets(logger, os.Stdout, storePath, resolved.Entry.Name, targets)
+	linkChanged, err := linkTargets(logger, storePath, resolved.Entry.Name, targets, symlinkBars)
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = fmt.Errorf("link skill %q: %w", resolved.Entry.Name, err)
-		return outcome
+		return outcome, lastBar
 	}
 	if storeChanged || linkChanged {
 		outcome.Action = actionInstalled
 	} else {
 		outcome.Action = actionSkipped
 	}
-	return outcome
+	return outcome, lastBar
 }
 
 func uninstall(c *cli.Context) error {
@@ -544,11 +709,11 @@ func uninstall(c *cli.Context) error {
 		logger.Info("dry-run: would unlink skill", "skill", entry.Name, "targets", strings.Join(targets, ","))
 		logger.Info("dry-run: would remove stored skill", "skill", entry.Name, "store", storePath)
 		outcome.Action = actionUninstalled
-		logSummary(logger, "uninstall", []operationOutcome{outcome})
+		logSummary(commandWriter(c), "uninstall", []operationOutcome{outcome})
 		return nil
 	}
 
-	removed, unlinkErr := unlinkTargets(logger, os.Stdout, storePath, entry.Name, targets)
+	removed, unlinkErr := unlinkTargets(logger, storePath, entry.Name, targets)
 	if unlinkErr != nil {
 		outcome.Action = actionFailed
 		outcome.Err = unlinkErr
@@ -560,7 +725,7 @@ func uninstall(c *cli.Context) error {
 	} else {
 		outcome.Action = actionUninstalled
 	}
-	failed := logSummary(logger, "uninstall", []operationOutcome{outcome})
+	failed := logSummary(commandWriter(c), "uninstall", []operationOutcome{outcome})
 	if failed > 0 {
 		return fmt.Errorf("uninstall completed with %d failed operation(s)", failed)
 	}
@@ -683,28 +848,27 @@ func actionForState(state string) string {
 	return actionInstalled
 }
 
-func linkTargets(logger *slog.Logger, writer io.Writer, storePath, skillName string, targets []string) (bool, error) {
+func linkTargets(logger *slog.Logger, storePath, skillName string, targets []string, bars []*mpb.Bar) (bool, error) {
 	changedAny := false
 	var firstErr error
-	for _, target := range targets {
+	for i, target := range targets {
 		linkPath := filepath.Join(target, skillName)
-		fmt.Fprintf(writer, "    Creating symlink to %s\n", linkPath)
 		logger.Debug("evaluating skill link", "skill", skillName, "link", linkPath)
 		changed, err := store.LinkSkill(storePath, linkPath)
+		completeTask(bars[i])
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: %w", target, err)
 			}
-			continue
+		} else {
+			changedAny = changedAny || changed
+			logger.Debug("link decision complete", "skill", skillName, "changed", changed)
 		}
-		changedAny = changedAny || changed
-		logger.Debug("link decision complete", "skill", skillName, "changed", changed)
-		fmt.Fprintf(writer, "    Created symlink to %s\n", linkPath)
 	}
 	return changedAny, firstErr
 }
 
-func unlinkTargets(logger *slog.Logger, writer io.Writer, storePath, skillName string, targets []string) (bool, error) {
+func unlinkTargets(logger *slog.Logger, storePath, skillName string, targets []string) (bool, error) {
 	changedAny := false
 	var firstErr error
 	for _, target := range targets {
@@ -723,26 +887,65 @@ func unlinkTargets(logger *slog.Logger, writer io.Writer, storePath, skillName s
 	return changedAny, firstErr
 }
 
-func logSummary(logger *slog.Logger, operation string, outcomes []operationOutcome) int {
+func logSummary(writer io.Writer, operation string, outcomes []operationOutcome) int {
 	failed := 0
-	for _, outcome := range outcomes {
-		attributes := []any{
-			"operation", operation,
-			"skill", outcome.Skill,
-			"action", outcome.Action,
-			"repository", outcome.Repository,
-			"source", outcome.Source,
-			"path", outcome.Path,
-			"targets", strings.Join(outcome.Targets, ","),
-			"dry_run", outcome.DryRun,
-		}
-		if outcome.Err != nil {
-			failed++
-			attributes = append(attributes, "error", outcome.Err.Error())
-		}
-		logger.Info("operation", attributes...)
+	type repositorySummary struct {
+		name   string
+		skills []string
 	}
-	logger.Info("summary", "operation", operation, "operations", len(outcomes), "failed", failed)
+	var toInstall, toUninstall []repositorySummary
+	for _, outcome := range outcomes {
+		if outcome.Action == actionFailed {
+			failed++
+		}
+		uninstall := operation == "uninstall" || outcome.Action == actionUninstalled
+		groups := &toInstall
+		if uninstall {
+			groups = &toUninstall
+		}
+		repository := outcome.Repository
+		if repository == "" {
+			repository = "local store"
+		}
+		index := -1
+		for i := range *groups {
+			if (*groups)[i].name == repository {
+				index = i
+				break
+			}
+		}
+		if index == -1 {
+			*groups = append(*groups, repositorySummary{name: repository})
+			index = len(*groups) - 1
+		}
+		name := outcome.Skill
+		if name == "" {
+			name = "repository operation"
+		}
+		detail := outcome.Action
+		if outcome.Err != nil {
+			detail += ": " + outcome.Err.Error()
+		}
+		(*groups)[index].skills = append((*groups)[index].skills, fmt.Sprintf("%s (%s)", name, detail))
+	}
+	printGroup := func(title string, groups []repositorySummary) {
+		if len(groups) == 0 {
+			return
+		}
+		fmt.Fprintln(writer, title)
+		for _, repository := range groups {
+			fmt.Fprintf(writer, "  - Repository: %s\n    - Skills:\n", repository.name)
+			for _, skill := range repository.skills {
+				fmt.Fprintf(writer, "      - %s\n", skill)
+			}
+		}
+	}
+	printGroup("Skills installed", toInstall)
+	if len(toInstall) > 0 && len(toUninstall) > 0 {
+		fmt.Fprintln(writer)
+	}
+	printGroup("Skills uninstalled", toUninstall)
+	fmt.Fprintf(writer, "Completed %d operation(s); %d failed.\n", len(outcomes), failed)
 	return failed
 }
 
@@ -766,12 +969,8 @@ func confirm(c *cli.Context, opts commandOptions, action string) error {
 	return errors.New("operation cancelled")
 }
 
-func commandLogger(c *cli.Context, debug bool) *slog.Logger {
-	level := slog.LevelInfo
-	if debug {
-		level = slog.LevelDebug
-	}
-	return slog.New(slog.NewTextHandler(commandWriter(c), &slog.HandlerOptions{Level: level}))
+func commandLogger(_ *cli.Context, _ bool) *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func commandWriter(c *cli.Context) io.Writer {
