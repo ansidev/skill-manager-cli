@@ -264,11 +264,14 @@ func TestUnlinkManagedSkillRemovesOnlyManagedSymlink(t *testing.T) {
 		t.Fatalf("managed link error = %v, want removed", err)
 	}
 
-	for _, path := range []string{unownedLink, regularFile, filepath.Join(root, "agent", "missing")} {
+	for _, path := range []string{unownedLink, regularFile} {
 		removed, err := UnlinkManagedSkill(storePath, path)
-		if err != nil || removed {
-			t.Fatalf("UnlinkManagedSkill(%q) = (%v, %v), want (false, nil)", path, removed, err)
+		if removed || !errors.Is(err, ErrPathConflict) {
+			t.Fatalf("UnlinkManagedSkill(%q) = (%v, %v), want path conflict", path, removed, err)
 		}
+	}
+	if removed, err := UnlinkManagedSkill(storePath, filepath.Join(root, "agent", "missing")); err != nil || removed {
+		t.Fatalf("UnlinkManagedSkill(missing) = (%v, %v), want (false, nil)", removed, err)
 	}
 	if _, err := os.Lstat(unownedLink); err != nil {
 		t.Fatalf("unowned link should remain: %v", err)

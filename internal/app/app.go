@@ -366,22 +366,7 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 		return outcome, after
 	}
 	if skill.Entry.State == "uninstalled" {
-		removed, err := unlinkTargets(logger, storePath, skill.Entry.Name, targets)
-		if err != nil {
-			outcome.Action = actionFailed
-			outcome.Err = err
-			return outcome, after
-		}
-		if !removed {
-			outcome.Action = actionSkipped
-			return outcome, after
-		}
-		if err := store.RemoveSkill(storePath); err != nil {
-			outcome.Action = actionFailed
-			outcome.Err = err
-			return outcome, after
-		}
-		outcome.Action = actionUninstalled
+		outcome.Action, outcome.Err = removeSkill(logger, storePath, skill.Entry.Name, targets)
 		return outcome, after
 	}
 	installBar := progress.add("Install skill: "+skill.Entry.Name, after)
@@ -713,18 +698,7 @@ func uninstall(c *cli.Context) error {
 		return nil
 	}
 
-	removed, unlinkErr := unlinkTargets(logger, storePath, entry.Name, targets)
-	if unlinkErr != nil {
-		outcome.Action = actionFailed
-		outcome.Err = unlinkErr
-	} else if !removed {
-		outcome.Action = actionSkipped
-	} else if err := store.RemoveSkill(storePath); err != nil {
-		outcome.Action = actionFailed
-		outcome.Err = fmt.Errorf("remove stored skill %q: %w", entry.Name, err)
-	} else {
-		outcome.Action = actionUninstalled
-	}
+	outcome.Action, outcome.Err = removeSkill(logger, storePath, entry.Name, targets)
 	failed := logSummary(commandWriter(c), "uninstall", []operationOutcome{outcome})
 	if failed > 0 {
 		return fmt.Errorf("uninstall completed with %d failed operation(s)", failed)
@@ -803,6 +777,9 @@ func validateDirectSelection(repository config.Repository, entry config.SkillEnt
 }
 
 func storeRoot() (string, error) {
+	if root := os.Getenv("SKILL_MANAGER_STORE_DIR"); root != "" {
+		return filepath.Abs(root)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
@@ -866,6 +843,75 @@ func linkTargets(logger *slog.Logger, storePath, skillName string, targets []str
 		}
 	}
 	return changedAny, firstErr
+}
+
+func removeSkill(logger *slog.Logger, storePath, skillName string, targets []string) (string, error) {
+	cfg, err := loadOptionalConfig()
+	if err != nil {
+		return actionFailed, err
+	}
+	configured, err := targetdirs.Resolve("", "", cfg)
+	if err != nil {
+		return actionFailed, err
+	}
+	selected := make(map[string]bool, len(targets))
+	for _, target := range targets {
+		abs, err := filepath.Abs(target)
+		if err != nil {
+			return actionFailed, err
+		}
+		selected[abs] = true
+	}
+	storeAbs, err := filepath.Abs(storePath)
+	if err != nil {
+		return actionFailed, err
+	}
+	for _, target := range configured {
+		abs, err := filepath.Abs(target)
+		if err != nil {
+			return actionFailed, err
+		}
+		if selected[abs] {
+			continue
+		}
+		link := filepath.Join(abs, skillName)
+		info, err := os.Lstat(link)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return actionFailed, fmt.Errorf("inspect configured path %q: %w", link, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		linked, err := os.Readlink(link)
+		if err != nil {
+			return actionFailed, fmt.Errorf("read configured link %q: %w", link, err)
+		}
+		if !filepath.IsAbs(linked) {
+			linked = filepath.Join(abs, linked)
+		}
+		if filepath.Clean(linked) == storeAbs {
+			return actionFailed, fmt.Errorf("configured link %q still references stored skill; include its agent", link)
+		}
+	}
+	removed, err := unlinkTargets(logger, storePath, skillName, targets)
+	if err != nil {
+		return actionFailed, err
+	}
+	_, err = os.Lstat(storePath)
+	if err != nil && !os.IsNotExist(err) {
+		return actionFailed, fmt.Errorf("inspect stored skill %q: %w", storePath, err)
+	}
+	exists := err == nil
+	if err := store.RemoveSkill(storePath); err != nil {
+		return actionFailed, fmt.Errorf("remove stored skill %q: %w", storePath, err)
+	}
+	if removed || exists {
+		return actionUninstalled, nil
+	}
+	return actionSkipped, nil
 }
 
 func unlinkTargets(logger *slog.Logger, storePath, skillName string, targets []string) (bool, error) {

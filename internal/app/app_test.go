@@ -382,8 +382,8 @@ func TestUninstallPreservesUserOwnedTargetAndStore(t *testing.T) {
 	}
 
 	app := New("1.0.0", "abc123")
-	if err := app.Run([]string{"skill", "uninstall", "--skill", "hello", "--skill-dirs", target, "-y"}); err != nil {
-		t.Fatalf("uninstall returned error: %v", err)
+	if err := app.Run([]string{"skill", "uninstall", "--skill", "hello", "--skill-dirs", target, "-y"}); err == nil {
+		t.Fatal("uninstall should report the user-owned path conflict")
 	}
 	if _, err := os.Stat(filepath.Join(userPath, "..")); err != nil {
 		t.Fatalf("user-owned target parent removed: %v", err)

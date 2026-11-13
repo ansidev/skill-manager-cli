@@ -69,8 +69,7 @@ func linkPointsTo(linkPath, storePath string) (bool, error) {
 	return resolvedTarget == resolvedStore, nil
 }
 
-// UnlinkManagedSkill removes linkPath only when it is a symbolic link to
-// storePath. Missing paths and user-owned entries are left unchanged.
+// UnlinkManagedSkill removes links to storePath and preserves conflicting entries.
 func UnlinkManagedSkill(storePath, linkPath string) (bool, error) {
 	info, err := os.Lstat(linkPath)
 	if os.IsNotExist(err) {
@@ -80,14 +79,14 @@ func UnlinkManagedSkill(storePath, linkPath string) (bool, error) {
 		return false, fmt.Errorf("inspect link for removal: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
-		return false, nil
+		return false, fmt.Errorf("%w: %s", ErrPathConflict, linkPath)
 	}
 	matches, err := linkPointsTo(linkPath, storePath)
 	if err != nil {
 		return false, err
 	}
 	if !matches {
-		return false, nil
+		return false, fmt.Errorf("%w: %s", ErrPathConflict, linkPath)
 	}
 	if err := os.Remove(linkPath); err != nil {
 		return false, fmt.Errorf("remove managed link: %w", err)
