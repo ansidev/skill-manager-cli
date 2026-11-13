@@ -63,16 +63,18 @@ const (
 )
 
 type operationOutcome struct {
-	Operation  string
-	Skill      string
-	Action     string
-	State      string
-	Repository string
-	Source     string
-	Path       string
-	Targets    []string
-	DryRun     bool
-	Err        error
+	Operation    string
+	Skill        string
+	Action       string
+	State        string
+	Repository   string
+	Source       string
+	Path         string
+	Targets      []string
+	DryRun       bool
+	Err          error
+	CreatedLinks []string
+	DeletedLinks []string
 }
 
 type applyRepository struct {
@@ -92,7 +94,7 @@ type taskProgress struct {
 }
 
 func newTaskProgress(writer io.Writer) *taskProgress {
-	return &taskProgress{bars: mpb.New(mpb.WithOutput(writer))}
+	return &taskProgress{bars: mpb.New(mpb.WithOutput(writer), mpb.WithAutoRefresh())}
 }
 
 func (p *taskProgress) add(label string, after *mpb.Bar) *mpb.Bar {
@@ -110,6 +112,7 @@ func (p *taskProgress) addTask(label string, after *mpb.Bar, spinner bool) *mpb.
 	options := []mpb.BarOption{
 		mpb.PrependDecorators(decor.Name(label)),
 		mpb.AppendDecorators(decor.OnComplete(decor.Percentage(), "done")),
+		mpb.BarRemoveOnComplete(),
 	}
 	if after != nil {
 		options = append(options, mpb.BarQueueAfter(after), mpb.BarFillerClearOnComplete())
@@ -222,16 +225,31 @@ func apply(c *cli.Context) error {
 		}
 	}
 
-	obtainRepositories(resolver, repositories, progress)
+	// Process repositories as soon as they are available. Local repositories
+	// are handled in-line; remote repositories are cloned with bounded
+	// parallelism and each clones triggers its own follow-up skill processing
+	// instead of waiting for every other clone to finish.
+	var outcomeMu sync.Mutex
+	var skillMu sync.Mutex
+	appendOutcome := func(outcome operationOutcome) {
+		outcomeMu.Lock()
+		defer outcomeMu.Unlock()
+		outcomes = append(outcomes, outcome)
+	}
 
-	for _, prepared := range repositories {
+	processPrepared := func(prepared *applyRepository, workspace *source.Workspace, obtainErr error) {
+		prepared.workspace = workspace
+		prepared.obtainErr = obtainErr
 		repository := prepared.repository
 		if len(prepared.entriesToResolve) == 0 {
-			continue
+			if workspace != nil {
+				_ = workspace.Cleanup()
+			}
+			return
 		}
-		if prepared.obtainErr != nil {
+		if obtainErr != nil {
 			for _, entry := range prepared.entriesToResolve {
-				outcomes = append(outcomes, operationOutcome{
+				appendOutcome(operationOutcome{
 					Operation:  "apply",
 					Skill:      entry.Name,
 					State:      normalizeSkillState(entry.State),
@@ -241,14 +259,14 @@ func apply(c *cli.Context) error {
 					Path:       config.JoinBase(entry.BasePath, entry.Name),
 					Targets:    targets,
 					DryRun:     c.Bool("dry-run"),
-					Err:        prepared.obtainErr,
+					Err:        obtainErr,
 				})
 			}
-			continue
+			return
 		}
 		resolution := source.ResolveSkills(prepared.workspace.Path, prepared.entriesToResolve)
 		for _, failure := range resolution.Failures {
-			outcomes = append(outcomes, operationOutcome{
+			appendOutcome(operationOutcome{
 				Operation:  "apply",
 				Skill:      failure.Entry.Name,
 				State:      normalizeSkillState(failure.Entry.State),
@@ -262,12 +280,14 @@ func apply(c *cli.Context) error {
 			})
 		}
 		for _, skill := range resolution.Skills {
+			skillMu.Lock()
 			outcome, lastBar := applySkill(logger, c, storeRoot, targets, repository.Repo, prepared.sourceLocation, relativeRepositoryPath(prepared.workspace.Path, skill.Path), skill, progress, prepared.progressBar)
+			skillMu.Unlock()
 			prepared.progressBar = lastBar
-			outcomes = append(outcomes, outcome)
+			appendOutcome(outcome)
 		}
 		if err := prepared.workspace.Cleanup(); err != nil {
-			outcomes = append(outcomes, operationOutcome{
+			appendOutcome(operationOutcome{
 				Operation:  "apply",
 				Action:     actionFailed,
 				Repository: repository.Repo,
@@ -277,6 +297,55 @@ func apply(c *cli.Context) error {
 				Err:        fmt.Errorf("clean workspace: %w", err),
 			})
 		}
+	}
+
+	for i := range repositories {
+		if len(repositories[i].entriesToResolve) == 0 {
+			continue
+		}
+		if repositories[i].provider.Type == "local" {
+			workspace, err := resolver.Obtain(repositories[i].repository.Repo, repositories[i].provider)
+			processPrepared(&repositories[i], workspace, err)
+		}
+	}
+
+	remote := make([]int, 0)
+	for i := range repositories {
+		if len(repositories[i].entriesToResolve) == 0 {
+			continue
+		}
+		if repositories[i].provider.Type != "local" {
+			remote = append(remote, i)
+		}
+	}
+	if len(remote) > 0 {
+		const maxConcurrentClones = 4
+		workerCount := min(len(remote), maxConcurrentClones)
+		jobs := make(chan int, len(remote))
+		for _, index := range remote {
+			jobs <- index
+		}
+		close(jobs)
+
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, workerCount)
+		wg.Add(workerCount)
+		for range workerCount {
+			go func() {
+				defer wg.Done()
+				for index := range jobs {
+					repo := repositories[index]
+					bar := progress.addSpinner("Clone repo: "+repo.repository.Repo, nil)
+					repositories[index].progressBar = bar
+					sem <- struct{}{}
+					workspace, err := resolver.Obtain(repo.repository.Repo, repo.provider)
+					<-sem
+					completeTask(bar)
+					processPrepared(&repositories[index], workspace, err)
+				}
+			}()
+		}
+		wg.Wait()
 	}
 
 	progress.wait()
@@ -380,8 +449,10 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 		return outcome, after
 	}
 	if skill.Entry.State == "uninstalled" {
-		outcome.Action, outcome.Err = removeSkill(logger, storePath, skill.Entry.Name, targets)
-		return outcome, after
+		uninstallBar := progress.add("Uninstall skill: "+skill.Entry.Name, after)
+		outcome.Action, outcome.Err = removeSkill(logger, storePath, skill.Entry.Name, targets, &outcome)
+		completeTask(uninstallBar)
+		return outcome, uninstallBar
 	}
 	installBar := progress.add("Install skill: "+skill.Entry.Name, after)
 	symlinkBars := symlinkTaskBars(progress, targets, skill.Entry.Name, installBar)
@@ -400,7 +471,7 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 		outcome.Err = err
 		return outcome, lastBar
 	}
-	linkChanged, err := linkTargets(logger, storeRoot, storePath, skill.Entry.Name, targets, symlinkBars, c.Bool("overwrite"))
+	linkChanged, err := linkTargets(logger, storeRoot, storePath, skill.Entry.Name, targets, symlinkBars, &outcome, c.Bool("overwrite"))
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = err
@@ -565,7 +636,7 @@ func printApplyPlan(writer io.Writer, cfg *config.Config) {
 		return
 	}
 	if len(install) > 0 {
-		fmt.Fprintln(writer, "Skills to install")
+		printHeading(writer, "Skills to install")
 		for _, entry := range install {
 			fmt.Fprintf(writer, "  - Repository: %s\n", entry.repo)
 			fmt.Fprintln(writer, "    - Skills:")
@@ -575,10 +646,7 @@ func printApplyPlan(writer io.Writer, cfg *config.Config) {
 		}
 	}
 	if len(uninstall) > 0 {
-		if len(install) > 0 {
-			fmt.Fprintln(writer)
-		}
-		fmt.Fprintln(writer, "Skills to uninstall")
+		printHeading(writer, "Skills to uninstall")
 		for _, entry := range uninstall {
 			fmt.Fprintf(writer, "  - Repository: %s\n", entry.repo)
 			fmt.Fprintln(writer, "    - Skills:")
@@ -780,7 +848,7 @@ func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, ta
 		return outcome, lastBar
 	}
 	logger.Debug("copy decision complete", "skill", resolved.Entry.Name, "changed", storeChanged)
-	linkChanged, err := linkTargets(logger, storeRoot, storePath, resolved.Entry.Name, targets, symlinkBars, opts.overwrite)
+	linkChanged, err := linkTargets(logger, storeRoot, storePath, resolved.Entry.Name, targets, symlinkBars, &outcome, opts.overwrite)
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = fmt.Errorf("link skill %q: %w", resolved.Entry.Name, err)
@@ -845,7 +913,7 @@ func uninstall(c *cli.Context) error {
 		return nil
 	}
 
-	outcome.Action, outcome.Err = removeSkill(logger, storePath, entry.Name, targets)
+	outcome.Action, outcome.Err = removeSkill(logger, storePath, entry.Name, targets, &outcome)
 	failed := logSummary(commandWriter(c), "uninstall", []operationOutcome{outcome})
 	if failed > 0 {
 		return fmt.Errorf("uninstall completed with %d failed operation(s)", failed)
@@ -979,7 +1047,7 @@ func normalizeSkillState(state string) string {
 	return state
 }
 
-func linkTargets(logger *slog.Logger, storeRoot, storePath, skillName string, targets []string, bars []*mpb.Bar, overwrite bool) (bool, error) {
+func linkTargets(logger *slog.Logger, storeRoot, storePath, skillName string, targets []string, bars []*mpb.Bar, outcome *operationOutcome, overwrite bool) (bool, error) {
 	changedAny := false
 	var firstErr error
 	for i, target := range targets {
@@ -1000,13 +1068,16 @@ func linkTargets(logger *slog.Logger, storeRoot, storePath, skillName string, ta
 			}
 		} else {
 			changedAny = changedAny || changed
+			if changed {
+				outcome.CreatedLinks = append(outcome.CreatedLinks, linkPath)
+			}
 			logger.Debug("link decision complete", "skill", skillName, "changed", changed)
 		}
 	}
 	return changedAny, firstErr
 }
 
-func removeSkill(logger *slog.Logger, storePath, skillName string, targets []string) (string, error) {
+func removeSkill(logger *slog.Logger, storePath, skillName string, targets []string, outcome *operationOutcome) (string, error) {
 	cfg, err := loadOptionalConfig()
 	if err != nil {
 		return actionFailed, err
@@ -1057,7 +1128,7 @@ func removeSkill(logger *slog.Logger, storePath, skillName string, targets []str
 			return actionFailed, fmt.Errorf("configured link %q still references stored skill; include its agent", link)
 		}
 	}
-	removed, err := unlinkTargets(logger, storePath, skillName, targets)
+	removed, err := unlinkTargets(logger, storePath, skillName, targets, outcome)
 	if err != nil {
 		return actionFailed, err
 	}
@@ -1075,7 +1146,7 @@ func removeSkill(logger *slog.Logger, storePath, skillName string, targets []str
 	return actionSkipped, nil
 }
 
-func unlinkTargets(logger *slog.Logger, storePath, skillName string, targets []string) (bool, error) {
+func unlinkTargets(logger *slog.Logger, storePath, skillName string, targets []string, outcome *operationOutcome) (bool, error) {
 	changedAny := false
 	var firstErr error
 	for _, target := range targets {
@@ -1083,12 +1154,22 @@ func unlinkTargets(logger *slog.Logger, storePath, skillName string, targets []s
 		logger.Debug("evaluating skill unlink", "skill", skillName, "link", linkPath)
 		changed, err := store.UnlinkManagedSkill(storePath, linkPath)
 		if err != nil {
+			// A path that is not a managed symlink for this store is not a
+			// failure: skip it and continue unlinking every managed symlink
+			// before the store copy is removed.
+			if errors.Is(err, store.ErrPathConflict) {
+				logger.Debug("skipping unmanaged path", "skill", skillName, "link", linkPath)
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("%s: %w", target, err)
 			}
 			continue
 		}
 		changedAny = changedAny || changed
+		if changed {
+			outcome.DeletedLinks = append(outcome.DeletedLinks, linkPath)
+		}
 		logger.Debug("unlink decision complete", "skill", skillName, "changed", changed)
 	}
 	return changedAny, firstErr
@@ -1124,7 +1205,14 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 		if outcome.Err != nil {
 			detail += ": " + outcome.Err.Error()
 		}
-		(*groups)[index].skills = append((*groups)[index].skills, fmt.Sprintf("%s (%s)", name, detail))
+		item := fmt.Sprintf("%s (%s)", name, detail)
+		for _, path := range outcome.CreatedLinks {
+			item += "\n        - symlink created: " + path
+		}
+		for _, path := range outcome.DeletedLinks {
+			item += "\n        - symlink deleted: " + path
+		}
+		(*groups)[index].skills = append((*groups)[index].skills, item)
 	}
 
 	var installed, skippedInstalled, uninstalled, skippedUninstalled []repositorySummary
@@ -1152,7 +1240,7 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 		if len(groups) == 0 {
 			return
 		}
-		fmt.Fprintln(writer, title)
+		printHeading(writer, title)
 		for _, repository := range groups {
 			fmt.Fprintf(writer, "  - Repository: %s\n    - Skills:\n", repository.name)
 			for _, skill := range repository.skills {
@@ -1170,15 +1258,10 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 		{"Uninstalled skills", uninstalled},
 		{"Skills to uninstall but skipped (already uninstalled)", skippedUninstalled},
 	}
-	first := true
 	for _, section := range sections {
 		if len(section.groups) == 0 {
 			continue
 		}
-		if !first {
-			fmt.Fprintln(writer)
-		}
-		first = false
 		printGroup(section.title, section.groups)
 	}
 	fmt.Fprintf(writer, "Completed %d operation(s); %d failed.\n", len(outcomes), failed)
@@ -1207,6 +1290,16 @@ func confirm(c *cli.Context, opts commandOptions, action string) error {
 
 func commandLogger(_ *cli.Context, _ bool) *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func printHeading(writer io.Writer, title string) {
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, colorizeHeading(title))
+}
+
+// colorizeHeading highlights a section heading for terminal output.
+func colorizeHeading(title string) string {
+	return "\033[1;36m" + title + "\033[0m"
 }
 
 func commandWriter(c *cli.Context) io.Writer {

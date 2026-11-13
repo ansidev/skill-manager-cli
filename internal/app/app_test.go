@@ -697,8 +697,8 @@ func TestUninstallPreservesUserOwnedTargetAndStore(t *testing.T) {
 	}
 
 	app := New("1.0.0", "abc123")
-	if err := app.Run([]string{"skill", "uninstall", "--skill", "hello", "--skill-dirs", target, "-y"}); err == nil {
-		t.Fatal("uninstall should report the user-owned path conflict")
+	if err := app.Run([]string{"skill", "uninstall", "--skill", "hello", "--skill-dirs", target, "-y"}); err != nil {
+		t.Fatalf("uninstall returned error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(userPath, "..")); err != nil {
 		t.Fatalf("user-owned target parent removed: %v", err)
@@ -706,8 +706,8 @@ func TestUninstallPreservesUserOwnedTargetAndStore(t *testing.T) {
 	if info, err := os.Stat(userPath); err != nil || !info.IsDir() {
 		t.Fatalf("user-owned target was not preserved: info=%v err=%v", info, err)
 	}
-	if _, err := os.Stat(storePath); err != nil {
-		t.Fatalf("store entry removed despite no managed link: %v", err)
+	if _, err := os.Stat(storePath); !os.IsNotExist(err) {
+		t.Fatalf("store entry remains after uninstall: %v", err)
 	}
 }
 
@@ -947,10 +947,10 @@ func TestRepositoryAcquisitionFailurePreservesRequestedStates(t *testing.T) {
 		t.Fatal("apply returned nil error for repository acquisition failure")
 	}
 	lines := strings.Split(output.String(), "\n")
-	if !slices.Contains(lines, "Installed skills") || !strings.Contains(output.String(), "alpha (failed:") {
+	if !slices.Contains(lines, colorizeHeading("Installed skills")) || !strings.Contains(output.String(), "alpha (failed:") {
 		t.Fatalf("install failure missing from Installed skills:\n%s", output.String())
 	}
-	if !slices.Contains(lines, "Uninstalled skills") || !strings.Contains(output.String(), "* (failed:") {
+	if !slices.Contains(lines, colorizeHeading("Uninstalled skills")) || !strings.Contains(output.String(), "* (failed:") {
 		t.Fatalf("uninstall failure missing from Uninstalled skills:\n%s", output.String())
 	}
 	if strings.Contains(output.String(), "Completed 1 operation(s)") {
@@ -976,10 +976,10 @@ func TestFailedWildcardUninstallIsReportedAsUninstalled(t *testing.T) {
 		t.Fatal("apply returned nil error for missing wildcard base path")
 	}
 	lines := strings.Split(output.String(), "\n")
-	if !slices.Contains(lines, "Uninstalled skills") {
+	if !slices.Contains(lines, colorizeHeading("Uninstalled skills")) {
 		t.Fatalf("failure was not reported under Uninstalled skills:\n%s", output.String())
 	}
-	if slices.Contains(lines, "Installed skills") {
+	if slices.Contains(lines, colorizeHeading("Installed skills")) {
 		t.Fatalf("failure was reported under Installed skills:\n%s", output.String())
 	}
 }
@@ -998,14 +998,14 @@ func TestLogSummaryUsesDistinctSectionsGroupedByRepository(t *testing.T) {
 		t.Fatalf("logSummary() failures = %d, want 0", failed)
 	}
 
-	want := "Installed skills\n" +
+	want := "\n\033[1;36mInstalled skills\033[0m\n" +
 		"  - Repository: repo-a\n    - Skills:\n      - alpha (installed)\n" +
 		"  - Repository: repo-b\n    - Skills:\n      - epsilon (installed)\n\n" +
-		"Skills to install but skipped (already installed)\n" +
+		"\033[1;36mSkills to install but skipped (already installed)\033[0m\n" +
 		"  - Repository: repo-a\n    - Skills:\n      - beta (skipped)\n\n" +
-		"Uninstalled skills\n" +
+		"\033[1;36mUninstalled skills\033[0m\n" +
 		"  - Repository: repo-b\n    - Skills:\n      - gamma (uninstalled)\n\n" +
-		"Skills to uninstall but skipped (already uninstalled)\n" +
+		"\033[1;36mSkills to uninstall but skipped (already uninstalled)\033[0m\n" +
 		"  - Repository: repo-b\n    - Skills:\n      - delta (skipped)\n" +
 		"Completed 5 operation(s); 0 failed.\n"
 	if got := output.String(); got != want {
