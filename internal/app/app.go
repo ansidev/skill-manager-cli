@@ -686,7 +686,7 @@ func directCommandFlags(overwrite bool) []cli.Flag {
 		&cli.StringFlag{Name: "repo", Usage: "Repository path or provider repository name"},
 		&cli.StringFlag{Name: "provider-type", Usage: "Provider type: github, local, or custom"},
 		&cli.StringFlag{Name: "provider-base-url", Usage: "Base URL for a custom provider"},
-		&cli.StringFlag{Name: "skill", Usage: "Skill name to manage"},
+		&cli.StringFlag{Name: "skill", Usage: "Skill name or '*' for all; defaults to configured repository skills"},
 		&cli.StringFlag{Name: "skill-base-path", Usage: "Path to skills in the repository"},
 		&cli.StringFlag{Name: "skill-dirs", Usage: "Comma-separated target skill directories"},
 		&cli.StringFlag{Name: "agents", Aliases: []string{"a"}, Usage: "Comma-separated configured agent names"},
@@ -724,7 +724,7 @@ func install(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	repository, entry, err := resolveSelection(opts, cfg, true)
+	repository, entries, err := resolveSelection(opts, cfg, true)
 	if err != nil {
 		return err
 	}
@@ -736,13 +736,26 @@ func install(c *cli.Context) error {
 		return errors.New("at least one target skill directory is required (use --skill-dirs or configure dirs)")
 	}
 
+	var outcomes []operationOutcome
+	valid := entries[:0]
+	for _, entry := range entries {
+		if err := validateDirectSelection(repository, entry); err != nil {
+			outcomes = append(outcomes, operationOutcome{Operation: "install", Skill: entry.Name, Repository: repository.Repo, Action: actionFailed, Err: err})
+		} else {
+			valid = append(valid, entry)
+		}
+	}
+	entries = valid
+	if len(entries) == 0 {
+		failed := logSummary(commandWriter(c), "install", outcomes)
+		return fmt.Errorf("install completed with %d failed operation(s)", failed)
+	}
 	storeRoot, err := storeRoot()
 	if err != nil {
 		return err
 	}
 	provider := repository.EffectiveProvider()
 	sourceLocation := repositorySource(repository.Repo, provider)
-	basePath := config.JoinBase(entry.BasePath, entry.Name)
 	progress := newTaskProgress(commandWriter(c))
 	defer progress.wait()
 	var lastBar *mpb.Bar
@@ -753,30 +766,17 @@ func install(c *cli.Context) error {
 	completeTask(lastBar)
 	if err != nil {
 		progress.wait()
-		logSummary(commandWriter(c), "install", []operationOutcome{{
-			Operation:  "install",
-			Skill:      entry.Name,
-			State:      "installed",
-			Action:     actionFailed,
-			Repository: repository.Repo,
-			Source:     sourceLocation,
-			Path:       basePath,
-			Targets:    targets,
-			DryRun:     opts.dryRun,
-			Err:        err,
-		}})
+		for _, entry := range entries {
+			outcomes = append(outcomes, operationOutcome{Operation: "install", Skill: entry.Name, State: "installed", Action: actionFailed, Repository: repository.Repo, Source: sourceLocation, Path: config.JoinBase(entry.BasePath, entry.Name), Targets: targets, DryRun: opts.dryRun, Err: err})
+		}
+		logSummary(commandWriter(c), "install", outcomes)
 		return err
 	}
 	defer workspace.Cleanup()
-	resolution := source.ResolveSkills(workspace.Path, []config.SkillEntry{entry})
-	if len(resolution.Skills) == 0 && len(resolution.Failures) == 0 {
+	resolution := source.ResolveSkills(workspace.Path, entries)
+	if len(resolution.Skills) == 0 && len(resolution.Failures) == 0 && len(outcomes) == 0 {
 		return fmt.Errorf("no skills selected for %q", repository.Repo)
 	}
-	if err := confirm(c, opts, fmt.Sprintf("install %d skill(s)", len(resolution.Skills))); err != nil {
-		return err
-	}
-
-	outcomes := make([]operationOutcome, 0, len(resolution.Skills)+len(resolution.Failures))
 	for _, failure := range resolution.Failures {
 		outcomes = append(outcomes, operationOutcome{
 			Operation:  "install",
@@ -790,7 +790,37 @@ func install(c *cli.Context) error {
 			Err:        failure.Err,
 		})
 	}
+	if len(resolution.Skills) == 0 && len(outcomes) > 0 {
+		failed := logSummary(commandWriter(c), "install", outcomes)
+		return fmt.Errorf("install completed with %d failed operation(s)", failed)
+	}
+	if err := confirm(c, opts, fmt.Sprintf("install %d skill(s)", len(resolution.Skills))); err != nil {
+		if len(outcomes) > 0 {
+			logSummary(commandWriter(c), "install", outcomes)
+		}
+		return err
+	}
+	pathsByName := make(map[string]string)
+	conflicts := make(map[string]bool)
 	for _, resolved := range resolution.Skills {
+		name := resolved.Entry.Name
+		if path, ok := pathsByName[name]; ok && path != resolved.Path {
+			conflicts[name] = true
+		} else {
+			pathsByName[name] = resolved.Path
+		}
+	}
+	seen := make(map[string]bool)
+	for _, resolved := range resolution.Skills {
+		name := resolved.Entry.Name
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		if conflicts[name] {
+			outcomes = append(outcomes, operationOutcome{Operation: "install", Skill: name, Repository: repository.Repo, Action: actionFailed, Err: fmt.Errorf("conflicting source paths for skill %q", name)})
+			continue
+		}
 		outcome, nextBar := installSkill(logger, opts, storeRoot, targets, repository.Repo, sourceLocation, relativeRepositoryPath(workspace.Path, resolved.Path), resolved, progress, lastBar)
 		lastBar = nextBar
 		outcomes = append(outcomes, outcome)
@@ -870,7 +900,7 @@ func uninstall(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	repository, entry, err := resolveSelection(opts, cfg, false)
+	repository, entries, err := resolveSelection(opts, cfg, false)
 	if err != nil {
 		return err
 	}
@@ -881,40 +911,77 @@ func uninstall(c *cli.Context) error {
 	if len(targets) == 0 {
 		return errors.New("at least one target skill directory is required (use --skill-dirs or configure dirs)")
 	}
-	storePath, err := storePathFor(entry.Name)
-	if err != nil {
+	var selected []config.SkillEntry
+	var outcomes []operationOutcome
+	var workspace *source.Workspace
+	for _, entry := range entries {
+		if err := validateDirectSelection(repository, entry); err != nil {
+			outcomes = append(outcomes, operationOutcome{Operation: "uninstall", Skill: entry.Name, Repository: repository.Repo, Action: actionFailed, Err: err})
+			continue
+		}
+		if entry.Name != "*" {
+			selected = append(selected, entry)
+			continue
+		}
+		if strings.TrimSpace(repository.Repo) == "" {
+			return errors.New("repository is required for wildcard uninstall")
+		}
+		if workspace == nil {
+			workspace, err = source.Obtain(repository.Repo, repository.EffectiveProvider())
+			if err != nil {
+				outcomes = append(outcomes, operationOutcome{Operation: "uninstall", Skill: entry.Name, Repository: repository.Repo, Action: actionFailed, Err: err})
+				continue
+			}
+			defer workspace.Cleanup()
+		}
+		resolution := source.ResolveSkills(workspace.Path, []config.SkillEntry{entry})
+		for _, failure := range resolution.Failures {
+			outcomes = append(outcomes, operationOutcome{Operation: "uninstall", Skill: failure.Entry.Name, Repository: repository.Repo, Action: actionFailed, Err: failure.Err})
+		}
+		for _, skill := range resolution.Skills {
+			selected = append(selected, skill.Entry)
+		}
+	}
+	if len(selected) == 0 && len(outcomes) == 0 {
+		return fmt.Errorf("no skills selected for %q", repository.Repo)
+	}
+	if len(selected) == 0 && len(outcomes) > 0 {
+		failed := logSummary(commandWriter(c), "uninstall", outcomes)
+		return fmt.Errorf("uninstall completed with %d failed operation(s)", failed)
+	}
+	if err := confirm(c, opts, fmt.Sprintf("uninstall %d skill(s)", len(selected))); err != nil {
+		if len(outcomes) > 0 {
+			logSummary(commandWriter(c), "uninstall", outcomes)
+		}
 		return err
 	}
-	if err := confirm(c, opts, fmt.Sprintf("uninstall skill %q", entry.Name)); err != nil {
-		return err
-	}
-
 	sourceLocation := ""
-	inRepoPath := ""
 	if strings.TrimSpace(repository.Repo) != "" {
 		sourceLocation = repositorySource(repository.Repo, repository.EffectiveProvider())
-		inRepoPath = config.JoinBase(entry.BasePath, entry.Name)
 	}
-	outcome := operationOutcome{
-		Operation:  "uninstall",
-		Skill:      entry.Name,
-		State:      "uninstalled",
-		Repository: repository.Repo,
-		Source:     sourceLocation,
-		Path:       inRepoPath,
-		Targets:    targets,
-		DryRun:     opts.dryRun,
+	for _, entry := range selected {
+		storePath, err := storePathFor(entry.Name)
+		if err != nil {
+			return err
+		}
+		outcome := operationOutcome{
+			Operation: "uninstall", Skill: entry.Name, State: "uninstalled",
+			Repository: repository.Repo, Source: sourceLocation,
+			Targets: targets, DryRun: opts.dryRun,
+		}
+		if sourceLocation != "" {
+			outcome.Path = config.JoinBase(entry.BasePath, entry.Name)
+		}
+		if opts.dryRun {
+			logger.Info("dry-run: would unlink skill", "skill", entry.Name, "targets", strings.Join(targets, ","))
+			logger.Info("dry-run: would remove stored skill", "skill", entry.Name, "store", storePath)
+			outcome.Action = actionUninstalled
+		} else {
+			outcome.Action, outcome.Err = removeSkill(logger, storePath, entry.Name, targets, &outcome)
+		}
+		outcomes = append(outcomes, outcome)
 	}
-	if opts.dryRun {
-		logger.Info("dry-run: would unlink skill", "skill", entry.Name, "targets", strings.Join(targets, ","))
-		logger.Info("dry-run: would remove stored skill", "skill", entry.Name, "store", storePath)
-		outcome.Action = actionUninstalled
-		logSummary(commandWriter(c), "uninstall", []operationOutcome{outcome})
-		return nil
-	}
-
-	outcome.Action, outcome.Err = removeSkill(logger, storePath, entry.Name, targets, &outcome)
-	failed := logSummary(commandWriter(c), "uninstall", []operationOutcome{outcome})
+	failed := logSummary(commandWriter(c), "uninstall", outcomes)
 	if failed > 0 {
 		return fmt.Errorf("uninstall completed with %d failed operation(s)", failed)
 	}
@@ -931,12 +998,15 @@ func loadOptionalConfig() (*config.Config, error) {
 	return config.Load(defaultConfigPath)
 }
 
-func resolveSelection(opts commandOptions, cfg *config.Config, requireRepository bool) (config.Repository, config.SkillEntry, error) {
+func resolveSelection(opts commandOptions, cfg *config.Config, requireRepository bool) (config.Repository, []config.SkillEntry, error) {
 	var matched *config.Repository
+	if !requireRepository && opts.repo == "" && opts.skill != "" && opts.skill != "*" && len(cfg.Skills) > 1 {
+		cfg = &config.Config{}
+	}
 	for i := range cfg.Skills {
 		if opts.repo == "" || cfg.Skills[i].Repo == opts.repo {
 			if matched != nil {
-				return config.Repository{}, config.SkillEntry{}, errors.New("repository is ambiguous; provide --repo")
+				return config.Repository{}, nil, errors.New("repository is ambiguous; provide --repo")
 			}
 			matched = &cfg.Skills[i]
 		}
@@ -947,7 +1017,7 @@ func resolveSelection(opts commandOptions, cfg *config.Config, requireRepository
 		repository = *matched
 	}
 	if requireRepository && strings.TrimSpace(repository.Repo) == "" {
-		return config.Repository{}, config.SkillEntry{}, errors.New("repository is required (use --repo or configure exactly one repository)")
+		return config.Repository{}, nil, errors.New("repository is required (use --repo or configure exactly one repository)")
 	}
 	provider := repository.EffectiveProvider()
 	if opts.providerType != "" {
@@ -961,28 +1031,42 @@ func resolveSelection(opts commandOptions, cfg *config.Config, requireRepository
 	}
 	provider.Normalize()
 	repository.Provider = &provider
+	if err := config.Validate(&config.Config{Skills: []config.Repository{repository}}); err != nil {
+		return config.Repository{}, nil, err
+	}
 
-	entry := config.SkillEntry{Name: opts.skill, BasePath: opts.skillBasePath}
-	if entry.Name == "" && matched != nil {
-		if len(matched.Skills) != 1 {
-			return config.Repository{}, config.SkillEntry{}, errors.New("skill is required (use --skill or configure exactly one skill)")
+	var entries []config.SkillEntry
+	if opts.skill != "" {
+		entry := config.SkillEntry{Name: opts.skill}
+		if matched != nil {
+			found := false
+			for _, configured := range matched.Skills {
+				if configured.Name == opts.skill {
+					if found && opts.skillBasePath == "" && config.JoinBase(entry.BasePath, entry.Name) != config.JoinBase(configured.BasePath, configured.Name) {
+						return config.Repository{}, nil, fmt.Errorf("skill %q has ambiguous configured base paths; use --skill-base-path", opts.skill)
+					}
+					entry = configured
+					found = true
+				}
+			}
 		}
-		entry = matched.Skills[0]
+		entries = []config.SkillEntry{entry}
+	} else if matched != nil {
+		entries = append(entries, matched.Skills...)
+	}
+	if len(entries) == 0 {
+		return config.Repository{}, nil, errors.New("skill is required (use --skill or configure repository skills)")
+	}
+	for i := range entries {
 		if opts.skillBasePath != "" {
-			entry.BasePath = opts.skillBasePath
+			entries[i].BasePath = opts.skillBasePath
 		}
 	}
-	if strings.TrimSpace(entry.Name) == "" {
-		return config.Repository{}, config.SkillEntry{}, errors.New("skill is required (use --skill or configure exactly one skill)")
-	}
-	if err := validateDirectSelection(repository, entry); err != nil {
-		return config.Repository{}, config.SkillEntry{}, err
-	}
-	return repository, entry, nil
+	return repository, entries, nil
 }
 
 func validateDirectSelection(repository config.Repository, entry config.SkillEntry) error {
-	if filepath.IsAbs(entry.Name) || filepath.Clean(entry.Name) != entry.Name || entry.Name == "." || entry.Name == ".." || strings.Contains(entry.Name, string(filepath.Separator)) {
+	if strings.TrimSpace(entry.Name) == "" || filepath.IsAbs(entry.Name) || filepath.Clean(entry.Name) != entry.Name || entry.Name == "." || entry.Name == ".." || strings.Contains(entry.Name, string(filepath.Separator)) {
 		return fmt.Errorf("skill name %q must be a single directory name", entry.Name)
 	}
 	if entry.State == "" {

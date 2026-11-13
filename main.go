@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/ansidev/skill-manager-cli/internal/app"
@@ -15,6 +16,7 @@ var (
 func main() {
 	application := app.New(version, commit)
 	if err := application.Run(os.Args); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
