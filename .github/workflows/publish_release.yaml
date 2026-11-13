@@ -14,6 +14,9 @@ jobs:
   release:
     name: Publish release
     runs-on: ubuntu-latest
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
     permissions:
       contents: write
     # only merge pull requests that begin with 'release/' or 'hotfix/'
@@ -70,3 +73,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
         run: goreleaser release --clean --config .goreleaser.yaml
+
+      - name: Generate and publish Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          RELEASE_TAG: ${{ env.VERSION_TAG_PREFIX }}${{ env.RELEASE_VERSION }}
+        run: |
+          set -euo pipefail
+          assets_dir=$(mktemp -d)
+          trap 'rm -rf "$assets_dir"' EXIT
+          gh release download "$RELEASE_TAG" --dir "$assets_dir" \
+            --pattern "skill-manager-cli_${RELEASE_VERSION}_*.tar.gz" \
+            --pattern "skill-manager-cli_${RELEASE_VERSION}_checksums.txt"
+          ASSET_DIR="$assets_dir" bash .github/scripts/update-formula.sh "$RELEASE_TAG" "$assets_dir/skill-manager-cli.rb"
+          latest=$(gh release view --json tagName --jq .tagName)
+          if [ "$latest" != "$RELEASE_TAG" ]; then
+            echo "Release $RELEASE_TAG is not the latest release ($latest); skipping formula update."
+            exit 0
+          fi
+          git fetch origin main
+          git checkout -B main origin/main
+          mkdir -p Formula
+          cp "$assets_dir/skill-manager-cli.rb" Formula/skill-manager-cli.rb
+          if git diff --quiet -- Formula/skill-manager-cli.rb && [ -z "$(git ls-files --others --exclude-standard Formula/skill-manager-cli.rb)" ]; then
+            echo "Formula is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/skill-manager-cli.rb
+          git commit -m "chore: update Homebrew formula to $RELEASE_VERSION"
+          git push origin HEAD:main

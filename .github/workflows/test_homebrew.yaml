@@ -1,0 +1,16 @@
+name: Test Homebrew formula generation
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test formula generation and platform selection
+        run: python3 -m unittest discover -s tests -v
