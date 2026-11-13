@@ -14,7 +14,7 @@ func TestStoreSkillCopiesMissingSource(t *testing.T) {
 	})
 	destination := filepath.Join(t.TempDir(), "store", "example")
 
-	changed, err := StoreSkill(source, destination)
+	changed, err := StoreSkill(source, destination, false)
 	if err != nil {
 		t.Fatalf("StoreSkill() error = %v", err)
 	}
@@ -32,7 +32,7 @@ func TestStoreSkillSkipsIdenticalDestination(t *testing.T) {
 	source := writeSkill(t, root, "source", map[string]string{"SKILL.md": "# Example\n"})
 	destination := writeSkill(t, root, "store/example", map[string]string{"SKILL.md": "# Example\n"})
 
-	changed, err := StoreSkill(source, destination)
+	changed, err := StoreSkill(source, destination, false)
 	if err != nil {
 		t.Fatalf("StoreSkill() error = %v", err)
 	}
@@ -53,7 +53,7 @@ func TestStoreSkillReplacesDestinationSymlinkWithPhysicalCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := StoreSkill(source, destination)
+	changed, err := StoreSkill(source, destination, false)
 	if err != nil {
 		t.Fatalf("StoreSkill() error = %v", err)
 	}
@@ -84,7 +84,7 @@ func TestStoreSkillTreatsDifferentSymlinkTargetsAsChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := StoreSkill(source, destination)
+	changed, err := StoreSkill(source, destination, false)
 	if err != nil {
 		t.Fatalf("StoreSkill() error = %v", err)
 	}
@@ -105,7 +105,7 @@ func TestStoreSkillReplacesChangedDestination(t *testing.T) {
 		"stale.txt": "remove me\n",
 	})
 
-	changed, err := StoreSkill(source, destination)
+	changed, err := StoreSkill(source, destination, false)
 	if err != nil {
 		t.Fatalf("StoreSkill() error = %v", err)
 	}
@@ -157,7 +157,7 @@ func TestLinkSkillCreatesAndPreservesManagedLink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := LinkSkill(storePath, linkPath)
+	changed, err := LinkSkill(storePath, linkPath, false)
 	if err != nil {
 		t.Fatalf("LinkSkill() error = %v", err)
 	}
@@ -166,7 +166,7 @@ func TestLinkSkillCreatesAndPreservesManagedLink(t *testing.T) {
 	}
 	assertLinkTarget(t, linkPath, storePath)
 
-	changed, err = LinkSkill(storePath, linkPath)
+	changed, err = LinkSkill(storePath, linkPath, false)
 	if err != nil {
 		t.Fatalf("LinkSkill() on managed link error = %v", err)
 	}
@@ -187,7 +187,7 @@ func TestLinkSkillReplacesDifferentSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := LinkSkill(storePath, linkPath)
+	changed, err := LinkSkill(storePath, linkPath, false)
 	if err != nil {
 		t.Fatalf("LinkSkill() error = %v", err)
 	}
@@ -208,7 +208,7 @@ func TestLinkSkillRejectsNonSymlinkDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	changed, err := LinkSkill(storePath, linkPath)
+	changed, err := LinkSkill(storePath, linkPath, false)
 	if changed {
 		t.Fatal("LinkSkill() changed = true, want false for conflict")
 	}

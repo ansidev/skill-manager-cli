@@ -16,7 +16,9 @@ var ErrPathConflict = errors.New("path conflicts with managed link")
 
 // LinkSkill creates or updates linkPath to point at storePath. It never
 // replaces a non-symlink destination.
-func LinkSkill(storePath, linkPath string) (bool, error) {
+func LinkSkill(storePath, linkPath string, overwrite ...bool) (bool, error) {
+	force := len(overwrite) > 0 && overwrite[0]
+
 	info, err := os.Lstat(linkPath)
 	if os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
@@ -29,6 +31,18 @@ func LinkSkill(storePath, linkPath string) (bool, error) {
 	}
 	if err != nil {
 		return false, fmt.Errorf("inspect link destination: %w", err)
+	}
+	if force {
+		if err := os.RemoveAll(linkPath); err != nil {
+			return false, fmt.Errorf("remove existing link destination: %w", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+			return false, fmt.Errorf("create link parent: %w", err)
+		}
+		if err := os.Symlink(storePath, linkPath); err != nil {
+			return false, fmt.Errorf("create managed link: %w", err)
+		}
+		return true, nil
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		return false, fmt.Errorf("%w: %s", ErrPathConflict, linkPath)
@@ -105,13 +119,16 @@ func RemoveSkill(storePath string) error {
 
 // StoreSkill copies sourcePath to destinationPath when their directory trees
 // differ. It returns false when destinationPath already has identical content.
-func StoreSkill(sourcePath, destinationPath string) (bool, error) {
-	equal, err := directoriesEqual(sourcePath, destinationPath)
-	if err != nil {
-		return false, err
-	}
-	if equal {
-		return false, nil
+func StoreSkill(sourcePath, destinationPath string, overwrite ...bool) (bool, error) {
+	force := len(overwrite) > 0 && overwrite[0]
+	if !force {
+		equal, err := directoriesEqual(sourcePath, destinationPath)
+		if err != nil {
+			return false, err
+		}
+		if equal {
+			return false, nil
+		}
 	}
 
 	parent := filepath.Dir(destinationPath)

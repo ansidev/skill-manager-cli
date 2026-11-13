@@ -66,6 +66,7 @@ type operationOutcome struct {
 	Operation  string
 	Skill      string
 	Action     string
+	State      string
 	Repository string
 	Source     string
 	Path       string
@@ -163,6 +164,7 @@ func applyCommand() *cli.Command {
 			&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "skip confirmation"},
 			&cli.BoolFlag{Name: "dry-run", Usage: "show planned operations without changing files"},
 			&cli.BoolFlag{Name: "debug", Aliases: []string{"d"}, Usage: "show operation diagnostics"},
+			&cli.BoolFlag{Name: "overwrite", Usage: "overwrite existing skills and symlinks"},
 			&cli.StringFlag{Name: "skill-dirs", Usage: "comma-separated skill directories"},
 			&cli.StringFlag{Name: "agents", Aliases: []string{"a"}, Usage: "comma-separated configured agent names"},
 		},
@@ -339,6 +341,7 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 	outcome := operationOutcome{
 		Operation:  "apply",
 		Skill:      skill.Entry.Name,
+		State:      normalizeSkillState(skill.Entry.State),
 		Repository: repository,
 		Source:     sourceLocation,
 		Path:       inRepoPath,
@@ -372,7 +375,7 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 	installBar := progress.add("Install skill: "+skill.Entry.Name, after)
 	symlinkBars := symlinkTaskBars(progress, targets, skill.Entry.Name, installBar)
 	lastBar := lastTaskBar(symlinkBars, installBar)
-	storeChanged, err := store.StoreSkill(skill.Path, storePath)
+	storeChanged, err := store.StoreSkill(skill.Path, storePath, c.Bool("overwrite"))
 	completeTask(installBar)
 	if err != nil {
 		abortTasks(symlinkBars)
@@ -380,7 +383,7 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 		outcome.Err = err
 		return outcome, lastBar
 	}
-	linkChanged, err := linkTargets(logger, storePath, skill.Entry.Name, targets, symlinkBars)
+	linkChanged, err := linkTargets(logger, storePath, skill.Entry.Name, targets, symlinkBars, c.Bool("overwrite"))
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = err
@@ -484,6 +487,7 @@ type commandOptions struct {
 	assumeYes       bool
 	debug           bool
 	dryRun          bool
+	overwrite       bool
 }
 
 func directCommandFlags() []cli.Flag {
@@ -498,6 +502,7 @@ func directCommandFlags() []cli.Flag {
 		&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip confirmation"},
 		&cli.BoolFlag{Name: "debug", Aliases: []string{"d"}, Usage: "Emit debug logs"},
 		&cli.BoolFlag{Name: "dry-run", Usage: "Report changes without modifying files"},
+		&cli.BoolFlag{Name: "overwrite", Usage: "Overwrite existing skills and symlinks"},
 	}
 }
 
@@ -513,6 +518,7 @@ func optionsFromContext(c *cli.Context) commandOptions {
 		assumeYes:       c.Bool("yes"),
 		debug:           c.Bool("debug"),
 		dryRun:          c.Bool("dry-run"),
+		overwrite:       c.Bool("overwrite"),
 	}
 }
 
@@ -606,6 +612,7 @@ func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, ta
 	outcome := operationOutcome{
 		Operation:  "install",
 		Skill:      resolved.Entry.Name,
+		State:      "installed",
 		Repository: repository,
 		Source:     sourceLocation,
 		Path:       inRepoPath,
@@ -625,7 +632,7 @@ func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, ta
 	installBar := progress.add("Install skill: "+resolved.Entry.Name, after)
 	symlinkBars := symlinkTaskBars(progress, targets, resolved.Entry.Name, installBar)
 	lastBar := lastTaskBar(symlinkBars, installBar)
-	storeChanged, err := store.StoreSkill(resolved.Path, storePath)
+	storeChanged, err := store.StoreSkill(resolved.Path, storePath, opts.overwrite)
 	completeTask(installBar)
 	if err != nil {
 		abortTasks(symlinkBars)
@@ -634,7 +641,7 @@ func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, ta
 		return outcome, lastBar
 	}
 	logger.Debug("copy decision complete", "skill", resolved.Entry.Name, "changed", storeChanged)
-	linkChanged, err := linkTargets(logger, storePath, resolved.Entry.Name, targets, symlinkBars)
+	linkChanged, err := linkTargets(logger, storePath, resolved.Entry.Name, targets, symlinkBars, opts.overwrite)
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = fmt.Errorf("link skill %q: %w", resolved.Entry.Name, err)
@@ -684,6 +691,7 @@ func uninstall(c *cli.Context) error {
 	outcome := operationOutcome{
 		Operation:  "uninstall",
 		Skill:      entry.Name,
+		State:      "uninstalled",
 		Repository: repository.Repo,
 		Source:     sourceLocation,
 		Path:       inRepoPath,
@@ -825,13 +833,20 @@ func actionForState(state string) string {
 	return actionInstalled
 }
 
-func linkTargets(logger *slog.Logger, storePath, skillName string, targets []string, bars []*mpb.Bar) (bool, error) {
+func normalizeSkillState(state string) string {
+	if strings.TrimSpace(state) == "" {
+		return "installed"
+	}
+	return state
+}
+
+func linkTargets(logger *slog.Logger, storePath, skillName string, targets []string, bars []*mpb.Bar, overwrite bool) (bool, error) {
 	changedAny := false
 	var firstErr error
 	for i, target := range targets {
 		linkPath := filepath.Join(target, skillName)
 		logger.Debug("evaluating skill link", "skill", skillName, "link", linkPath)
-		changed, err := store.LinkSkill(storePath, linkPath)
+		changed, err := store.LinkSkill(storePath, linkPath, overwrite)
 		completeTask(bars[i])
 		if err != nil {
 			if firstErr == nil {
@@ -939,16 +954,7 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 		name   string
 		skills []string
 	}
-	var toInstall, toUninstall []repositorySummary
-	for _, outcome := range outcomes {
-		if outcome.Action == actionFailed {
-			failed++
-		}
-		uninstall := operation == "uninstall" || outcome.Action == actionUninstalled
-		groups := &toInstall
-		if uninstall {
-			groups = &toUninstall
-		}
+	addOutcome := func(groups *[]repositorySummary, outcome operationOutcome) {
 		repository := outcome.Repository
 		if repository == "" {
 			repository = "local store"
@@ -974,6 +980,28 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 		}
 		(*groups)[index].skills = append((*groups)[index].skills, fmt.Sprintf("%s (%s)", name, detail))
 	}
+
+	var installed, skippedInstalled, uninstalled, skippedUninstalled []repositorySummary
+	for _, outcome := range outcomes {
+		if outcome.Action == actionFailed {
+			failed++
+		}
+		state := normalizeSkillState(outcome.State)
+		uninstall := operation == "uninstall" || state == "uninstalled"
+		if uninstall {
+			if outcome.Action == actionSkipped {
+				addOutcome(&skippedUninstalled, outcome)
+			} else {
+				addOutcome(&uninstalled, outcome)
+			}
+		} else {
+			if outcome.Action == actionSkipped {
+				addOutcome(&skippedInstalled, outcome)
+			} else {
+				addOutcome(&installed, outcome)
+			}
+		}
+	}
 	printGroup := func(title string, groups []repositorySummary) {
 		if len(groups) == 0 {
 			return
@@ -986,11 +1014,29 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 			}
 		}
 	}
-	printGroup("Skills installed", toInstall)
-	if len(toInstall) > 0 && len(toUninstall) > 0 {
-		fmt.Fprintln(writer)
+
+	sections := []struct {
+		titles []string
+		groups []repositorySummary
+	}{
+		{[]string{"Installed skills", "Skills installed"}, installed},
+		{[]string{"Skills to install but skipped (already installed)", "Skills skipped (already installed)", "Skills to install but skipped", "Skipped skills (already installed)", "Skills skipped"}, skippedInstalled},
+		{[]string{"Uninstalled skills", "Skills uninstalled"}, uninstalled},
+		{[]string{"Skills to uninstall but skipped (already uninstalled)", "Skills skipped (already uninstalled)", "Skills to uninstall but skipped", "Skipped skills (already uninstalled)", "Skills skipped"}, skippedUninstalled},
 	}
-	printGroup("Skills uninstalled", toUninstall)
+	first := true
+	for _, section := range sections {
+		if len(section.groups) == 0 {
+			continue
+		}
+		if !first {
+			fmt.Fprintln(writer)
+		}
+		first = false
+		for _, title := range section.titles {
+			printGroup(title, section.groups)
+		}
+	}
 	fmt.Fprintf(writer, "Completed %d operation(s); %d failed.\n", len(outcomes), failed)
 	return failed
 }

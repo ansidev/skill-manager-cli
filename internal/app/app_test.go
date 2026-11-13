@@ -633,7 +633,7 @@ func TestInstallSummaryReportsSkippedOnRepeat(t *testing.T) {
 		t.Fatalf("repeat install returned error: %v\n%s", err, output.String())
 	}
 	assertOutputContains(t, output.String(),
-		"Skills installed",
+		"Skills skipped",
 		"hello (skipped)",
 		"Completed 1 operation(s); 0 failed.",
 	)
@@ -651,7 +651,7 @@ func TestUninstallSummaryReportsSkippedWhenNothingManaged(t *testing.T) {
 		t.Fatalf("uninstall of absent skill returned error: %v\n%s", err, output.String())
 	}
 	assertOutputContains(t, output.String(),
-		"Skills uninstalled",
+		"Skills skipped",
 		"absent (skipped)",
 		"Completed 1 operation(s); 0 failed.",
 	)
