@@ -40,13 +40,13 @@ func New(versionStr, commitStr string) *cli.App {
 			{
 				Name:   "install",
 				Usage:  "Install selected skills from one repository",
-				Flags:  directCommandFlags(),
+				Flags:  directCommandFlags(true),
 				Action: install,
 			},
 			{
 				Name:   "uninstall",
 				Usage:  "Remove selected managed skills",
-				Flags:  directCommandFlags(),
+				Flags:  directCommandFlags(false),
 				Action: uninstall,
 			},
 		},
@@ -230,15 +230,20 @@ func apply(c *cli.Context) error {
 			continue
 		}
 		if prepared.obtainErr != nil {
-			outcomes = append(outcomes, operationOutcome{
-				Operation:  "apply",
-				Action:     actionFailed,
-				Repository: repository.Repo,
-				Source:     prepared.sourceLocation,
-				Targets:    targets,
-				DryRun:     c.Bool("dry-run"),
-				Err:        prepared.obtainErr,
-			})
+			for _, entry := range prepared.entriesToResolve {
+				outcomes = append(outcomes, operationOutcome{
+					Operation:  "apply",
+					Skill:      entry.Name,
+					State:      normalizeSkillState(entry.State),
+					Action:     actionFailed,
+					Repository: repository.Repo,
+					Source:     prepared.sourceLocation,
+					Path:       config.JoinBase(entry.BasePath, entry.Name),
+					Targets:    targets,
+					DryRun:     c.Bool("dry-run"),
+					Err:        prepared.obtainErr,
+				})
+			}
 			continue
 		}
 		resolution := source.ResolveSkills(prepared.workspace.Path, prepared.entriesToResolve)
@@ -246,6 +251,7 @@ func apply(c *cli.Context) error {
 			outcomes = append(outcomes, operationOutcome{
 				Operation:  "apply",
 				Skill:      failure.Entry.Name,
+				State:      normalizeSkillState(failure.Entry.State),
 				Action:     actionFailed,
 				Repository: repository.Repo,
 				Source:     prepared.sourceLocation,
@@ -362,6 +368,11 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 			return outcome, after
 		}
 	}
+	if err := validateStoreTargetPaths(storeRoot, skill.Entry.Name, targets); err != nil {
+		outcome.Action = actionFailed
+		outcome.Err = err
+		return outcome, after
+	}
 	logger.Debug("evaluating configured skill", "skill", skill.Entry.Name, "repository", repository, "path", inRepoPath)
 	if outcome.DryRun {
 		outcome.Action = actionForState(skill.Entry.State)
@@ -383,7 +394,13 @@ func applySkill(logger *slog.Logger, c *cli.Context, storeRoot string, targets [
 		outcome.Err = err
 		return outcome, lastBar
 	}
-	linkChanged, err := linkTargets(logger, storePath, skill.Entry.Name, targets, symlinkBars, c.Bool("overwrite"))
+	if err := validateStoreTargetPaths(storeRoot, skill.Entry.Name, targets); err != nil {
+		abortTasks(symlinkBars)
+		outcome.Action = actionFailed
+		outcome.Err = err
+		return outcome, lastBar
+	}
+	linkChanged, err := linkTargets(logger, storeRoot, storePath, skill.Entry.Name, targets, symlinkBars, c.Bool("overwrite"))
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = err
@@ -403,6 +420,112 @@ func validSkillName(name string) bool {
 		return false
 	}
 	return name == filepath.Clean(name) && !strings.ContainsAny(name, "/\\")
+}
+
+func validateStoreTargetPaths(storeRoot, skillName string, targets []string) error {
+	canonicalTargets := make([]string, 0, len(targets))
+	for _, target := range targets {
+		targetPath := filepath.Join(target, skillName)
+		if err := validateStoreTargetPath(storeRoot, targetPath); err != nil {
+			return err
+		}
+		canonicalTarget, err := canonicalPath(targetPath)
+		if err != nil {
+			return fmt.Errorf("resolve target path %q: %w", targetPath, err)
+		}
+		for i, existing := range canonicalTargets {
+			if pathContains(existing, canonicalTarget) || pathContains(canonicalTarget, existing) {
+				return fmt.Errorf("target paths %q and %q overlap", filepath.Join(targets[i], skillName), targetPath)
+			}
+		}
+		canonicalTargets = append(canonicalTargets, canonicalTarget)
+	}
+	return nil
+}
+
+func validateStoreTargetPath(storeRoot, targetPath string) error {
+	canonicalStore, err := canonicalStoreRoot(storeRoot)
+	if err != nil {
+		return fmt.Errorf("resolve store path %q: %w", storeRoot, err)
+	}
+	storeLocation, err := canonicalPath(storeRoot)
+	if err != nil {
+		return fmt.Errorf("resolve store path %q: %w", storeRoot, err)
+	}
+	canonicalTarget, err := canonicalPath(targetPath)
+	if err != nil {
+		return fmt.Errorf("resolve target path %q: %w", targetPath, err)
+	}
+	for _, storePath := range []string{canonicalStore, storeLocation} {
+		if pathContains(storePath, canonicalTarget) || pathContains(canonicalTarget, storePath) {
+			return fmt.Errorf("target path %q overlaps central store path %q", targetPath, storeRoot)
+		}
+	}
+	return nil
+}
+
+func canonicalStoreRoot(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err == nil {
+		return filepath.Clean(resolved), nil
+	}
+	if !os.IsNotExist(err) {
+		return "", err
+	}
+	info, lstatErr := os.Lstat(absolute)
+	if lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("resolve dangling store root symlink %q: %w", absolute, err)
+	}
+	if lstatErr != nil && !os.IsNotExist(lstatErr) {
+		return "", lstatErr
+	}
+	return canonicalPath(absolute)
+}
+
+func canonicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	name := filepath.Base(absolute)
+	current := filepath.Dir(absolute)
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if os.IsNotExist(err) {
+			info, lstatErr := os.Lstat(current)
+			if lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("resolve dangling symlink %q: %w", current, err)
+			}
+			if lstatErr != nil && !os.IsNotExist(lstatErr) {
+				return "", lstatErr
+			}
+		}
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(filepath.Join(resolved, name)), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(absolute), nil
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
+func pathContains(parent, path string) bool {
+	relative, err := filepath.Rel(parent, path)
+	return err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
 }
 
 func validateScopedPath(storeRoot, storePath, targetRoot, targetPath string) error {
@@ -490,8 +613,8 @@ type commandOptions struct {
 	overwrite       bool
 }
 
-func directCommandFlags() []cli.Flag {
-	return []cli.Flag{
+func directCommandFlags(overwrite bool) []cli.Flag {
+	flags := []cli.Flag{
 		&cli.StringFlag{Name: "repo", Usage: "Repository path or provider repository name"},
 		&cli.StringFlag{Name: "provider-type", Usage: "Provider type: github, local, or custom"},
 		&cli.StringFlag{Name: "provider-base-url", Usage: "Base URL for a custom provider"},
@@ -502,8 +625,11 @@ func directCommandFlags() []cli.Flag {
 		&cli.BoolFlag{Name: "yes", Aliases: []string{"y"}, Usage: "Skip confirmation"},
 		&cli.BoolFlag{Name: "debug", Aliases: []string{"d"}, Usage: "Emit debug logs"},
 		&cli.BoolFlag{Name: "dry-run", Usage: "Report changes without modifying files"},
-		&cli.BoolFlag{Name: "overwrite", Usage: "Overwrite existing skills and symlinks"},
 	}
+	if overwrite {
+		flags = append(flags, &cli.BoolFlag{Name: "overwrite", Usage: "Overwrite existing skills and symlinks"})
+	}
+	return flags
 }
 
 func optionsFromContext(c *cli.Context) commandOptions {
@@ -561,6 +687,8 @@ func install(c *cli.Context) error {
 		progress.wait()
 		logSummary(commandWriter(c), "install", []operationOutcome{{
 			Operation:  "install",
+			Skill:      entry.Name,
+			State:      "installed",
 			Action:     actionFailed,
 			Repository: repository.Repo,
 			Source:     sourceLocation,
@@ -620,6 +748,11 @@ func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, ta
 		DryRun:     opts.dryRun,
 	}
 	storePath := filepath.Join(storeRoot, resolved.Entry.Name)
+	if err := validateStoreTargetPaths(storeRoot, resolved.Entry.Name, targets); err != nil {
+		outcome.Action = actionFailed
+		outcome.Err = err
+		return outcome, after
+	}
 	logger.Debug("evaluating skill copy", "skill", resolved.Entry.Name, "source", resolved.Path, "store", storePath)
 	if opts.dryRun {
 		outcome.Action = actionInstalled
@@ -640,8 +773,14 @@ func installSkill(logger *slog.Logger, opts commandOptions, storeRoot string, ta
 		outcome.Err = fmt.Errorf("store skill %q: %w", resolved.Entry.Name, err)
 		return outcome, lastBar
 	}
+	if err := validateStoreTargetPaths(storeRoot, resolved.Entry.Name, targets); err != nil {
+		abortTasks(symlinkBars)
+		outcome.Action = actionFailed
+		outcome.Err = err
+		return outcome, lastBar
+	}
 	logger.Debug("copy decision complete", "skill", resolved.Entry.Name, "changed", storeChanged)
-	linkChanged, err := linkTargets(logger, storePath, resolved.Entry.Name, targets, symlinkBars, opts.overwrite)
+	linkChanged, err := linkTargets(logger, storeRoot, storePath, resolved.Entry.Name, targets, symlinkBars, opts.overwrite)
 	if err != nil {
 		outcome.Action = actionFailed
 		outcome.Err = fmt.Errorf("link skill %q: %w", resolved.Entry.Name, err)
@@ -840,12 +979,19 @@ func normalizeSkillState(state string) string {
 	return state
 }
 
-func linkTargets(logger *slog.Logger, storePath, skillName string, targets []string, bars []*mpb.Bar, overwrite bool) (bool, error) {
+func linkTargets(logger *slog.Logger, storeRoot, storePath, skillName string, targets []string, bars []*mpb.Bar, overwrite bool) (bool, error) {
 	changedAny := false
 	var firstErr error
 	for i, target := range targets {
 		linkPath := filepath.Join(target, skillName)
 		logger.Debug("evaluating skill link", "skill", skillName, "link", linkPath)
+		if err := validateStoreTargetPath(storeRoot, linkPath); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", target, err)
+			}
+			completeTask(bars[i])
+			continue
+		}
 		changed, err := store.LinkSkill(storePath, linkPath, overwrite)
 		completeTask(bars[i])
 		if err != nil {
@@ -1016,13 +1162,13 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 	}
 
 	sections := []struct {
-		titles []string
+		title  string
 		groups []repositorySummary
 	}{
-		{[]string{"Installed skills", "Skills installed"}, installed},
-		{[]string{"Skills to install but skipped (already installed)", "Skills skipped (already installed)", "Skills to install but skipped", "Skipped skills (already installed)", "Skills skipped"}, skippedInstalled},
-		{[]string{"Uninstalled skills", "Skills uninstalled"}, uninstalled},
-		{[]string{"Skills to uninstall but skipped (already uninstalled)", "Skills skipped (already uninstalled)", "Skills to uninstall but skipped", "Skipped skills (already uninstalled)", "Skills skipped"}, skippedUninstalled},
+		{"Installed skills", installed},
+		{"Skills to install but skipped (already installed)", skippedInstalled},
+		{"Uninstalled skills", uninstalled},
+		{"Skills to uninstall but skipped (already uninstalled)", skippedUninstalled},
 	}
 	first := true
 	for _, section := range sections {
@@ -1033,9 +1179,7 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 			fmt.Fprintln(writer)
 		}
 		first = false
-		for _, title := range section.titles {
-			printGroup(title, section.groups)
-		}
+		printGroup(section.title, section.groups)
 	}
 	fmt.Fprintf(writer, "Completed %d operation(s); %d failed.\n", len(outcomes), failed)
 	return failed

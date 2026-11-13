@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +145,91 @@ func TestApplyInstallsConfiguredLocalSkill(t *testing.T) {
 	}
 }
 
+func TestApplyOverwriteSynchronizesStoreAndReplacesTarget(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "example", "SKILL.md"), "# Upstream\n")
+	target := filepath.Join(root, "agent", "skills")
+	writeFile(t, filepath.Join(target, "example", "user.txt"), "replace me\n")
+	storePath := filepath.Join(root, ".agents", "skills", "example")
+	writeFile(t, filepath.Join(storePath, "SKILL.md"), "# Local\n")
+	writeFile(t, filepath.Join(storePath, "stale.txt"), "remove me\n")
+	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+target+"\nskills:\n  - repo: "+repository+"\n    provider:\n      type: local\n    skills:\n      - name: example\n")
+
+	app := New("dev", "test")
+	var output bytes.Buffer
+	app.Writer = &output
+	if err := app.Run([]string{"skill", "apply", "--yes", "--overwrite", "--agents", "pi"}); err != nil {
+		t.Fatalf("apply --overwrite returned error: %v\n%s", err, output.String())
+	}
+	assertLinkTarget(t, filepath.Join(target, "example"), storePath)
+	contents, err := os.ReadFile(filepath.Join(storePath, "SKILL.md"))
+	if err != nil || string(contents) != "# Upstream\n" {
+		t.Fatalf("stored skill contents = %q, %v; want upstream contents", contents, err)
+	}
+	if _, err := os.Lstat(filepath.Join(storePath, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale store entry error = %v, want not exist", err)
+	}
+}
+
+func TestApplyOverwriteRejectsTargetThatAliasesStore(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "example", "SKILL.md"), "# Upstream\n")
+	storeRoot := filepath.Join(root, ".agents", "skills")
+	storePath := filepath.Join(storeRoot, "example")
+	writeFile(t, filepath.Join(storePath, "SKILL.md"), "# Local\n")
+	targetAlias := filepath.Join(root, "target-alias")
+	if err := os.Symlink(storeRoot, targetAlias); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+targetAlias+"\nskills:\n  - repo: "+repository+"\n    provider:\n      type: local\n    skills:\n      - name: example\n")
+
+	app := New("dev", "test")
+	if err := app.Run([]string{"skill", "apply", "--yes", "--overwrite", "--agents", "pi"}); err == nil {
+		t.Fatal("apply --overwrite with target aliasing store returned nil error")
+	}
+	info, err := os.Lstat(storePath)
+	if err != nil {
+		t.Fatalf("store entry was removed: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		t.Fatalf("store entry mode = %v, want physical directory", info.Mode())
+	}
+	contents, err := os.ReadFile(filepath.Join(storePath, "SKILL.md"))
+	if err != nil || string(contents) != "# Local\n" {
+		t.Fatalf("store contents = %q, %v; want local copy preserved", contents, err)
+	}
+}
+
+func TestApplyOverwriteRejectsDanglingTargetAliasAfterStoreCreation(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "example", "SKILL.md"), "# Upstream\n")
+	storeRoot := filepath.Join(root, ".agents", "skills")
+	targetAlias := filepath.Join(root, "target-alias")
+	if err := os.Symlink(storeRoot, targetAlias); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+targetAlias+"\nskills:\n  - repo: "+repository+"\n    provider:\n      type: local\n    skills:\n      - name: example\n")
+
+	app := New("dev", "test")
+	if err := app.Run([]string{"skill", "apply", "--yes", "--overwrite", "--agents", "pi"}); err == nil {
+		t.Fatal("apply --overwrite with dangling target alias returned nil error")
+	}
+	storePath := filepath.Join(storeRoot, "example")
+	assertPathMissing(t, storePath)
+}
+
 func TestApplyRejectionDoesNotMutate(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -245,7 +331,7 @@ func TestApplyContinuesAfterSkillSelectionFailure(t *testing.T) {
 		t.Fatalf("valid skill was not applied after independent failure: %v", err)
 	}
 	assertOutputContains(t, output.String(),
-		"Skills installed",
+		"Installed skills",
 		"missing (failed:",
 		"valid (installed)",
 		"Completed 2 operation(s); 1 failed.",
@@ -315,6 +401,235 @@ func TestInstallThenUninstallLocalSkill(t *testing.T) {
 	}
 	if _, err := os.Stat(storePath); !os.IsNotExist(err) {
 		t.Fatalf("stored skill remains after uninstall: %v", err)
+	}
+}
+
+func TestInstallOverwriteReplacesStoreAndTarget(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "hello", "SKILL.md"), "# Upstream\n")
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	target := filepath.Join(root, "target")
+	writeFile(t, filepath.Join(target, "hello", "user.txt"), "replace me\n")
+	storePath := filepath.Join(home, ".agents", "skills", "hello")
+	writeFile(t, filepath.Join(storePath, "SKILL.md"), "# Local\n")
+	writeFile(t, filepath.Join(storePath, "stale.txt"), "remove me\n")
+
+	application := New("dev", "test")
+	var output bytes.Buffer
+	application.Writer = &output
+	args := []string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", target, "--overwrite", "-y"}
+	if err := application.Run(args); err != nil {
+		t.Fatalf("install --overwrite returned error: %v\n%s", err, output.String())
+	}
+	assertLinkTarget(t, filepath.Join(target, "hello"), storePath)
+	contents, err := os.ReadFile(filepath.Join(storePath, "SKILL.md"))
+	if err != nil || string(contents) != "# Upstream\n" {
+		t.Fatalf("stored skill contents = %q, %v; want upstream contents", contents, err)
+	}
+	if _, err := os.Lstat(filepath.Join(storePath, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale store entry error = %v, want not exist", err)
+	}
+}
+
+func TestInstallOverwriteDoesNotReplaceSymlinkedStoreRoot(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "skills", "SKILL.md"), "# Skills\n")
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	actualStoreRoot := filepath.Join(root, "actual-store")
+	if err := os.MkdirAll(actualStoreRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	storeRoot := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(filepath.Dir(storeRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(actualStoreRoot, storeRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	application := New("dev", "test")
+	args := []string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "skills", "--skill-dirs", filepath.Join(home, ".agents"), "--overwrite", "-y"}
+	if err := application.Run(args); err == nil {
+		t.Fatal("install --overwrite returned nil error for target equal to symlinked store root")
+	}
+	got, err := os.Readlink(storeRoot)
+	if err != nil || got != actualStoreRoot {
+		t.Fatalf("store root link target = %q, %v; want %q preserved", got, err, actualStoreRoot)
+	}
+	assertPathMissing(t, filepath.Join(actualStoreRoot, "skills"))
+}
+
+func TestInstallOverwriteProtectsSymlinkedStoreRoot(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "hello", "SKILL.md"), "# Hello\n")
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	actualStoreRoot := filepath.Join(root, "actual-store")
+	if err := os.MkdirAll(actualStoreRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	storeRoot := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(filepath.Dir(storeRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(actualStoreRoot, storeRoot); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(actualStoreRoot, "other")
+	writeFile(t, filepath.Join(target, "hello", "user.txt"), "preserve me\n")
+
+	application := New("dev", "test")
+	args := []string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", target, "--overwrite", "-y"}
+	if err := application.Run(args); err == nil {
+		t.Fatal("install --overwrite returned nil error for target inside symlinked store")
+	}
+	contents, err := os.ReadFile(filepath.Join(target, "hello", "user.txt"))
+	if err != nil || string(contents) != "preserve me\n" {
+		t.Fatalf("stored content = %q, %v; want preserved", contents, err)
+	}
+}
+
+func TestInstallOverwriteRejectsTargetInsideAnotherStoredSkill(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "hello", "SKILL.md"), "# Hello\n")
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	storeRoot := filepath.Join(home, ".agents", "skills")
+	otherSkillTarget := filepath.Join(storeRoot, "other")
+	writeFile(t, filepath.Join(otherSkillTarget, "hello", "user.txt"), "preserve me\n")
+
+	application := New("dev", "test")
+	args := []string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", otherSkillTarget, "--overwrite", "-y"}
+	if err := application.Run(args); err == nil {
+		t.Fatal("install --overwrite returned nil error for target inside central store")
+	}
+	contents, err := os.ReadFile(filepath.Join(otherSkillTarget, "hello", "user.txt"))
+	if err != nil || string(contents) != "preserve me\n" {
+		t.Fatalf("other stored skill contents = %q, %v; want preserved", contents, err)
+	}
+}
+
+func TestInstallOverwriteRejectsOverlappingTargets(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "hello", "SKILL.md"), "# Hello\n")
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	targetRoot := filepath.Join(root, "targets")
+	firstTarget := filepath.Join(targetRoot, "hello")
+
+	application := New("dev", "test")
+	args := []string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", firstTarget + "," + targetRoot, "--overwrite", "-y"}
+	if err := application.Run(args); err == nil {
+		t.Fatal("install --overwrite returned nil error for overlapping targets")
+	}
+	storePath := filepath.Join(root, "home", ".agents", "skills", "hello")
+	assertPathMissing(t, storePath)
+	assertPathMissing(t, targetRoot)
+}
+
+func TestInstallOverwriteRejectsNestedTargetDirectories(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "hello", "SKILL.md"), "# Hello\n")
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	firstTarget := filepath.Join(root, "targets")
+	secondTarget := filepath.Join(firstTarget, "hello")
+
+	application := New("dev", "test")
+	args := []string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", firstTarget + "," + secondTarget, "--overwrite", "-y"}
+	if err := application.Run(args); err == nil {
+		t.Fatal("install returned nil error for nested target that becomes a store alias")
+	}
+	storePath := filepath.Join(root, "home", ".agents", "skills", "hello")
+	assertPathMissing(t, storePath)
+	assertPathMissing(t, firstTarget)
+}
+
+func TestInstallOverwriteRejectsTargetThatAliasesStore(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "hello", "SKILL.md"), "# Upstream\n")
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	storeRoot := filepath.Join(home, ".agents", "skills")
+	storePath := filepath.Join(storeRoot, "hello")
+	writeFile(t, filepath.Join(storePath, "SKILL.md"), "# Local\n")
+	targetAlias := filepath.Join(root, "target-alias")
+	if err := os.Symlink(storeRoot, targetAlias); err != nil {
+		t.Fatal(err)
+	}
+
+	application := New("dev", "test")
+	if err := application.Run([]string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", targetAlias, "--overwrite", "-y"}); err == nil {
+		t.Fatal("install --overwrite with target aliasing store returned nil error")
+	}
+	info, err := os.Lstat(storePath)
+	if err != nil {
+		t.Fatalf("store entry was removed: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		t.Fatalf("store entry mode = %v, want physical directory", info.Mode())
+	}
+	contents, err := os.ReadFile(filepath.Join(storePath, "SKILL.md"))
+	if err != nil || string(contents) != "# Local\n" {
+		t.Fatalf("store contents = %q, %v; want local copy preserved", contents, err)
+	}
+}
+
+func TestInstallOverwriteRevalidatesTargetAfterReplacingStoreSymlink(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	writeFile(t, filepath.Join(repository, "skills", "hello", "SKILL.md"), "# Upstream\n")
+	home := filepath.Join(root, "home")
+	t.Setenv("HOME", home)
+	storeRoot := filepath.Join(home, ".agents", "skills")
+	if err := os.MkdirAll(storeRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(root, "external")
+	writeFile(t, filepath.Join(external, "old.txt"), "old\n")
+	storePath := filepath.Join(storeRoot, "hello")
+	if err := os.Symlink(external, storePath); err != nil {
+		t.Fatal(err)
+	}
+
+	application := New("dev", "test")
+	if err := application.Run([]string{"skill", "install", "--repo", repository, "--provider-type", "local", "--skill", "hello", "--skill-dirs", storePath, "--overwrite", "-y"}); err == nil {
+		t.Fatal("install --overwrite with target overlapping replaced store returned nil error")
+	}
+	info, err := os.Lstat(storePath)
+	if err != nil {
+		t.Fatalf("synchronized store entry missing: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		t.Fatalf("store entry mode = %v, want physical directory", info.Mode())
+	}
+	if _, err := os.Lstat(filepath.Join(storePath, "hello")); !os.IsNotExist(err) {
+		t.Fatalf("nested self-link error = %v, want absent", err)
+	}
+}
+
+func TestInstallAcquisitionFailureReportsSelectedSkill(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	baseURL := "file://" + filepath.Join(root, "missing-repository")
+	target := filepath.Join(root, "target")
+
+	application := New("dev", "test")
+	var output bytes.Buffer
+	application.Writer = &output
+	args := []string{"skill", "install", "--repo", "skills", "--provider-type", "custom", "--provider-base-url", baseURL, "--skill", "hello", "--skill-dirs", target, "-y"}
+	if err := application.Run(args); err == nil {
+		t.Fatal("install returned nil error for repository acquisition failure")
+	}
+	if !strings.Contains(output.String(), "hello (failed:") {
+		t.Fatalf("summary omitted selected skill:\n%s", output.String())
 	}
 }
 
@@ -550,7 +865,7 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 	assertLinkTarget(t, filepath.Join(namedTarget, "alpha"), filepath.Join(storeRoot, "alpha"))
 	assertFileExists(t, filepath.Join(storeRoot, "alpha", "SKILL.md"))
 	assertOutputContains(t, output.String(),
-		"Skills installed",
+		"Installed skills",
 		"alpha (installed)",
 		"Completed 1 operation(s); 0 failed.",
 	)
@@ -562,7 +877,7 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 	assertPathMissing(t, filepath.Join(namedTarget, "alpha"))
 	assertPathMissing(t, filepath.Join(storeRoot, "alpha"))
 	assertOutputContains(t, output.String(),
-		"Skills uninstalled",
+		"Uninstalled skills",
 		"alpha (uninstalled)",
 		"Completed 1 operation(s); 0 failed.",
 	)
@@ -577,7 +892,7 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 		assertPathMissing(t, filepath.Join(wildcardTarget, skill))
 	}
 	assertOutputContains(t, output.String(),
-		"Skills installed",
+		"Installed skills",
 		"alpha (installed)",
 		"beta (installed)",
 		"Completed 2 operation(s); 0 failed.",
@@ -593,7 +908,7 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 		assertFileExists(t, filepath.Join(storeRoot, skill, "SKILL.md"))
 	}
 	assertOutputContains(t, output.String(),
-		"Skills installed",
+		"Installed skills",
 		"alpha (installed)",
 		"beta (installed)",
 		"Completed 2 operation(s); 0 failed.",
@@ -608,10 +923,118 @@ func TestEndToEndLifecycleWithOperationSummary(t *testing.T) {
 	assertPathMissing(t, filepath.Join(storeRoot, "beta"))
 	assertLinkTarget(t, filepath.Join(wildcardTarget, "alpha"), filepath.Join(storeRoot, "alpha"))
 	assertOutputContains(t, output.String(),
-		"Skills uninstalled",
+		"Uninstalled skills",
 		"beta (uninstalled)",
 		"Completed 1 operation(s); 0 failed.",
 	)
+}
+
+func TestRepositoryAcquisitionFailurePreservesRequestedStates(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+	target := filepath.Join(root, "agent", "skills")
+	missingRepository := "file://" + filepath.Join(root, "missing-repository")
+	configContents := "dirs:\n  pi: " + target +
+		"\nskills:\n  - repo: skills\n    provider:\n      type: custom\n      base_url: " + missingRepository +
+		"\n    skills:\n      - name: alpha\n      - name: \"*\"\n        state: uninstalled\n"
+	writeFile(t, filepath.Join(root, "config.yaml"), configContents)
+
+	application := New("dev", "test")
+	var output bytes.Buffer
+	application.Writer = &output
+	if err := application.Run([]string{"skill", "apply", "--yes", "--agents", "pi"}); err == nil {
+		t.Fatal("apply returned nil error for repository acquisition failure")
+	}
+	lines := strings.Split(output.String(), "\n")
+	if !slices.Contains(lines, "Installed skills") || !strings.Contains(output.String(), "alpha (failed:") {
+		t.Fatalf("install failure missing from Installed skills:\n%s", output.String())
+	}
+	if !slices.Contains(lines, "Uninstalled skills") || !strings.Contains(output.String(), "* (failed:") {
+		t.Fatalf("uninstall failure missing from Uninstalled skills:\n%s", output.String())
+	}
+	if strings.Contains(output.String(), "Completed 1 operation(s)") {
+		t.Fatalf("expected one failure per configured skill:\n%s", output.String())
+	}
+}
+
+func TestFailedWildcardUninstallIsReportedAsUninstalled(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+	repository := filepath.Join(root, "repository")
+	if err := os.MkdirAll(repository, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "agent", "skills")
+	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+target+"\nskills:\n  - repo: "+repository+"\n    provider:\n      type: local\n    skills:\n      - name: \"*\"\n        state: uninstalled\n")
+
+	application := New("dev", "test")
+	var output bytes.Buffer
+	application.Writer = &output
+	if err := application.Run([]string{"skill", "apply", "--yes", "--agents", "pi"}); err == nil {
+		t.Fatal("apply returned nil error for missing wildcard base path")
+	}
+	lines := strings.Split(output.String(), "\n")
+	if !slices.Contains(lines, "Uninstalled skills") {
+		t.Fatalf("failure was not reported under Uninstalled skills:\n%s", output.String())
+	}
+	if slices.Contains(lines, "Installed skills") {
+		t.Fatalf("failure was reported under Installed skills:\n%s", output.String())
+	}
+}
+
+func TestLogSummaryUsesDistinctSectionsGroupedByRepository(t *testing.T) {
+	outcomes := []operationOutcome{
+		{Operation: "apply", Skill: "alpha", State: "installed", Action: actionInstalled, Repository: "repo-a"},
+		{Operation: "apply", Skill: "epsilon", State: "installed", Action: actionInstalled, Repository: "repo-b"},
+		{Operation: "apply", Skill: "beta", State: "installed", Action: actionSkipped, Repository: "repo-a"},
+		{Operation: "apply", Skill: "gamma", State: "uninstalled", Action: actionUninstalled, Repository: "repo-b"},
+		{Operation: "apply", Skill: "delta", State: "uninstalled", Action: actionSkipped, Repository: "repo-b"},
+	}
+	var output bytes.Buffer
+
+	if failed := logSummary(&output, "apply", outcomes); failed != 0 {
+		t.Fatalf("logSummary() failures = %d, want 0", failed)
+	}
+
+	want := "Installed skills\n" +
+		"  - Repository: repo-a\n    - Skills:\n      - alpha (installed)\n" +
+		"  - Repository: repo-b\n    - Skills:\n      - epsilon (installed)\n\n" +
+		"Skills to install but skipped (already installed)\n" +
+		"  - Repository: repo-a\n    - Skills:\n      - beta (skipped)\n\n" +
+		"Uninstalled skills\n" +
+		"  - Repository: repo-b\n    - Skills:\n      - gamma (uninstalled)\n\n" +
+		"Skills to uninstall but skipped (already uninstalled)\n" +
+		"  - Repository: repo-b\n    - Skills:\n      - delta (skipped)\n" +
+		"Completed 5 operation(s); 0 failed.\n"
+	if got := output.String(); got != want {
+		t.Errorf("logSummary() output =\n%s\nwant =\n%s", got, want)
+	}
+}
+
+func TestOverwriteFlagIsAvailableOnlyForInstallingCommands(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		{command: "apply", want: true},
+		{command: "install", want: true},
+		{command: "uninstall", want: false},
+	} {
+		t.Run(test.command, func(t *testing.T) {
+			application := New("dev", "test")
+			var output bytes.Buffer
+			application.Writer = &output
+			if err := application.Run([]string{"skill", test.command, "--help"}); err != nil {
+				t.Fatalf("help returned error: %v", err)
+			}
+			got := strings.Contains(output.String(), "--overwrite")
+			if got != test.want {
+				t.Errorf("--overwrite available = %v, want %v:\n%s", got, test.want, output.String())
+			}
+		})
+	}
 }
 
 func TestInstallSummaryReportsSkippedOnRepeat(t *testing.T) {
@@ -633,7 +1056,7 @@ func TestInstallSummaryReportsSkippedOnRepeat(t *testing.T) {
 		t.Fatalf("repeat install returned error: %v\n%s", err, output.String())
 	}
 	assertOutputContains(t, output.String(),
-		"Skills skipped",
+		"Skills to install but skipped (already installed)",
 		"hello (skipped)",
 		"Completed 1 operation(s); 0 failed.",
 	)
@@ -651,7 +1074,7 @@ func TestUninstallSummaryReportsSkippedWhenNothingManaged(t *testing.T) {
 		t.Fatalf("uninstall of absent skill returned error: %v\n%s", err, output.String())
 	}
 	assertOutputContains(t, output.String(),
-		"Skills skipped",
+		"Skills to uninstall but skipped (already uninstalled)",
 		"absent (skipped)",
 		"Completed 1 operation(s); 0 failed.",
 	)

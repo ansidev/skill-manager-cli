@@ -94,6 +94,33 @@ func TestStoreSkillTreatsDifferentSymlinkTargetsAsChanged(t *testing.T) {
 	assertLinkTarget(t, filepath.Join(destination, "payload"), "../shared")
 }
 
+func TestStoreSkillOverwriteSynchronizesDestinationAndRemovesStaleEntries(t *testing.T) {
+	root := t.TempDir()
+	source := writeSkill(t, root, "source", map[string]string{
+		"SKILL.md": "# Upstream\n",
+		"new.txt":  "new\n",
+	})
+	destination := writeSkill(t, root, "store/example", map[string]string{
+		"SKILL.md":  "# Local changes\n",
+		"stale.txt": "remove me\n",
+	})
+
+	changed, err := StoreSkill(source, destination, true)
+	if err != nil {
+		t.Fatalf("StoreSkill(overwrite) error = %v", err)
+	}
+	if !changed {
+		t.Fatal("StoreSkill(overwrite) changed = false, want true")
+	}
+	assertSkillContents(t, destination, map[string]string{
+		"SKILL.md": "# Upstream\n",
+		"new.txt":  "new\n",
+	})
+	if _, err := os.Lstat(filepath.Join(destination, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale entry error = %v, want not exist", err)
+	}
+}
+
 func TestStoreSkillReplacesChangedDestination(t *testing.T) {
 	root := t.TempDir()
 	source := writeSkill(t, root, "source", map[string]string{
@@ -193,6 +220,27 @@ func TestLinkSkillReplacesDifferentSymlink(t *testing.T) {
 	}
 	if !changed {
 		t.Fatal("LinkSkill() changed = false, want true")
+	}
+	assertLinkTarget(t, linkPath, storePath)
+}
+
+func TestLinkSkillOverwriteReplacesExistingTarget(t *testing.T) {
+	root := t.TempDir()
+	storePath := writeSkill(t, root, "store/example", map[string]string{"SKILL.md": "# Example\n"})
+	linkPath := filepath.Join(root, "agent", "skills", "example")
+	if err := os.MkdirAll(filepath.Dir(linkPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(linkPath, []byte("user-owned"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := LinkSkill(storePath, linkPath, true)
+	if err != nil {
+		t.Fatalf("LinkSkill(overwrite) error = %v", err)
+	}
+	if !changed {
+		t.Fatal("LinkSkill(overwrite) changed = false, want true")
 	}
 	assertLinkTarget(t, linkPath, storePath)
 }
