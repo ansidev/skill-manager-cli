@@ -1,4 +1,9 @@
-.PHONY: prepare
+.DEFAULT_GOAL := prepare
+.PHONY: prepare release-snapshot
+
+# Build release archives and checksums locally without publishing a release.
+release-snapshot:
+	goreleaser release --snapshot --clean
 
 # Install the tools used by the git hooks and enable the hooks (works in linked
 # git worktrees: the hooks live in the shared git hooks directory).
