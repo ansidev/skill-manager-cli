@@ -9,7 +9,7 @@ on:
 jobs:
   create_release_pr:
     name: Create release pull request
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     # only create draft pull requests on
@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.ref_name }}
           token: ${{ secrets.GH_TOKEN }}
