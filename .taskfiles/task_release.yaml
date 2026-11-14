@@ -8,7 +8,7 @@ env:
   CHANGELOG_FILE: CHANGELOG.md
 
 vars:
-  VERSION_FILE: package.json
+  VERSION_FILE: main.go
 
 tasks:
   prepare:
@@ -69,17 +69,20 @@ tasks:
     silent: true
 
   create:
-    desc: Generate release commit
+    desc: Bump version and generate release commit (pass a version to override the auto bump)
     vars:
-      VERSION_TAG: ${TAG_PREFIX}{{.CLI_ARGS}}
+      VERSION_TAG:
+        sh: if [ -n "{{.CLI_ARGS}}" ]; then echo "${TAG_PREFIX}{{.CLI_ARGS}}"; else git-cliff --bumped-version; fi
+      VERSION: '{{trimPrefix "v" .VERSION_TAG}}'
     cmds:
       - echo "Releasing version {{.VERSION_TAG}}"
       - |
         if [ -f ${CHANGELOG_FILE} ]; then
           # Prepend only the new release section to the existing changelog
-          git-cliff --unreleased --tag {{.VERSION_TAG}} --prepend ${CHANGELOG_FILE}
+          git-cliff -v --unreleased --tag {{.VERSION_TAG}} --prepend ${CHANGELOG_FILE}
         else
-          git-cliff --unreleased --tag {{.VERSION_TAG}} --output ${CHANGELOG_FILE}
+          git-cliff -v --unreleased --tag {{.VERSION_TAG}} --output ${CHANGELOG_FILE}
         fi
-      - task release:commit_release -- {{.CLI_ARGS}}
+      - sed -i.bak -E 's/(^[[:space:]]*)version = .*/\1version = "{{.VERSION}}"/' {{.VERSION_FILE}} && rm {{.VERSION_FILE}}.bak
+      - task release:commit_release -- {{.VERSION}}
     silent: true

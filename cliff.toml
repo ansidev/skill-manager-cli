@@ -44,6 +44,11 @@ filter_commits = false
 topo_order = false
 sort_commits = "oldest"
 
+[bump]
+# Version used when the repo has no tags yet; keeps the "v" prefix so the
+# bumped version matches `tag_pattern` above.
+initial_tag = "v0.1.0"
+
 commit_parsers = [
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Bug Fixes" },
