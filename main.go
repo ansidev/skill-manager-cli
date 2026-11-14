@@ -9,7 +9,7 @@ import (
 
 // These variables are set via ldflags at build time.
 var (
-	version = "dev"
+	version = "1.0.0"
 	commit  = "unknown"
 )
 

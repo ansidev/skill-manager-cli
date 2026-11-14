@@ -75,7 +75,7 @@ func Validate(c *Config) error {
 		if prov.Type != "github" && prov.Type != "local" && prov.Type != "custom" {
 			return fmt.Errorf("repository %q: invalid provider.type %q (want github, local, or custom)", r.Repo, prov.Type)
 		}
-		if prov.Type != "custom" && prov.BaseURL != "" && !(prov.Type == "github" && prov.BaseURL == "https://github.com") {
+		if prov.Type != "custom" && prov.BaseURL != "" && (prov.Type != "github" || prov.BaseURL != "https://github.com") {
 			return fmt.Errorf("repository %q: base_url is only valid for provider.type: custom", r.Repo)
 		}
 		for _, s := range r.Skills {

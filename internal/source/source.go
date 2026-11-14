@@ -144,7 +144,7 @@ func (r *Resolver) Obtain(repo string, provider config.Provider) (*Workspace, er
 		return nil, fmt.Errorf("create temporary directory: %w", err)
 	}
 	if err := r.Clone(resolved.URL, tempRoot); err != nil {
-		os.RemoveAll(tempRoot)
+		_ = os.RemoveAll(tempRoot)
 		return nil, err
 	}
 	return &Workspace{Path: tempRoot, Cleanup: func() error {

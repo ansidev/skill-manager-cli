@@ -57,7 +57,7 @@ func TestApplyProcessesAvailableRepositoryWhileCloneIsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer output.Close()
+	defer func() { _ = output.Close() }()
 	release := filepath.Join(root, "release")
 	waiting := filepath.Join(root, "waiting")
 	cmd := exec.Command(binary, "apply", "-y")
@@ -74,7 +74,8 @@ func TestApplyProcessesAvailableRepositoryWhileCloneIsPending(t *testing.T) {
 		if !finished {
 			_ = os.WriteFile(release, nil, 0o600)
 			select {
-			case <-done:
+			case err := <-done:
+				_ = err
 			case <-time.After(5 * time.Second):
 				_ = cmd.Process.Kill()
 			}
