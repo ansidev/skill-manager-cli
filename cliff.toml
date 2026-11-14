@@ -44,11 +44,9 @@ filter_commits = false
 topo_order = false
 sort_commits = "oldest"
 
-[bump]
-# Version used when the repo has no tags yet; keeps the "v" prefix so the
-# bumped version matches `tag_pattern` above.
-initial_tag = "v0.1.0"
-
+# Note: keep this table under [git]; placing it after [bump] would make it
+# `bump.commit_parsers` (a TOML mistake) and git-cliff would silently fall
+# back to its built-in default parsers (emoji groups with <!-- n --> anchors).
 commit_parsers = [
   { message = "^feat", group = "Features" },
   { message = "^fix", group = "Bug Fixes" },
@@ -63,3 +61,8 @@ commit_parsers = [
   { message = "^chore|^build", group = "Miscellaneous Chores" },
   { message = ".*", group = "Other" },
 ]
+
+[bump]
+# Version used when the repo has no tags yet; keeps the "v" prefix so the
+# bumped version matches `tag_pattern` above.
+initial_tag = "v0.1.0"
