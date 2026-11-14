@@ -33,7 +33,7 @@ func New(versionStr, commitStr string) *cli.App {
 				if err := config.WriteExample(defaultConfigPath); err != nil {
 					return err
 				}
-				fmt.Fprintln(commandWriter(c), "created config.yaml")
+				_, _ = fmt.Fprintln(commandWriter(c), "created config.yaml")
 				return nil
 			}},
 			applyCommand(),
@@ -188,7 +188,7 @@ func apply(c *cli.Context) error {
 	}
 	printApplyPlan(c.App.Writer, cfg)
 	if !c.Bool("yes") && !confirmApply(c.App.Reader, c.App.Writer) {
-		fmt.Fprintln(c.App.Writer, "apply cancelled")
+		_, _ = fmt.Fprintln(c.App.Writer, "apply cancelled")
 		return nil
 	}
 
@@ -638,27 +638,27 @@ func printApplyPlan(writer io.Writer, cfg *config.Config) {
 	if len(install) > 0 {
 		printHeading(writer, "Skills to install")
 		for _, entry := range install {
-			fmt.Fprintf(writer, "  - Repository: %s\n", entry.repo)
-			fmt.Fprintln(writer, "    - Skills:")
+			_, _ = fmt.Fprintf(writer, "  - Repository: %s\n", entry.repo)
+			_, _ = fmt.Fprintln(writer, "    - Skills:")
 			for _, skill := range entry.skills {
-				fmt.Fprintf(writer, "      - %s\n", skill)
+				_, _ = fmt.Fprintf(writer, "      - %s\n", skill)
 			}
 		}
 	}
 	if len(uninstall) > 0 {
 		printHeading(writer, "Skills to uninstall")
 		for _, entry := range uninstall {
-			fmt.Fprintf(writer, "  - Repository: %s\n", entry.repo)
-			fmt.Fprintln(writer, "    - Skills:")
+			_, _ = fmt.Fprintf(writer, "  - Repository: %s\n", entry.repo)
+			_, _ = fmt.Fprintln(writer, "    - Skills:")
 			for _, skill := range entry.skills {
-				fmt.Fprintf(writer, "      - %s\n", skill)
+				_, _ = fmt.Fprintf(writer, "      - %s\n", skill)
 			}
 		}
 	}
 }
 
 func confirmApply(reader io.Reader, writer io.Writer) bool {
-	fmt.Fprint(writer, "Apply configured skill changes? [y/N] ")
+	_, _ = fmt.Fprint(writer, "Apply configured skill changes? [y/N] ")
 	line, err := bufio.NewReader(reader).ReadString('\n')
 	if err != nil {
 		return false
@@ -772,7 +772,7 @@ func install(c *cli.Context) error {
 		logSummary(commandWriter(c), "install", outcomes)
 		return err
 	}
-	defer workspace.Cleanup()
+	defer func() { _ = workspace.Cleanup() }()
 	resolution := source.ResolveSkills(workspace.Path, entries)
 	if len(resolution.Skills) == 0 && len(resolution.Failures) == 0 && len(outcomes) == 0 {
 		return fmt.Errorf("no skills selected for %q", repository.Repo)
@@ -932,7 +932,7 @@ func uninstall(c *cli.Context) error {
 				outcomes = append(outcomes, operationOutcome{Operation: "uninstall", Skill: entry.Name, Repository: repository.Repo, Action: actionFailed, Err: err})
 				continue
 			}
-			defer workspace.Cleanup()
+			defer func() { _ = workspace.Cleanup() }()
 		}
 		resolution := source.ResolveSkills(workspace.Path, []config.SkillEntry{entry})
 		for _, failure := range resolution.Failures {
@@ -1326,9 +1326,9 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 		}
 		printHeading(writer, title)
 		for _, repository := range groups {
-			fmt.Fprintf(writer, "  - Repository: %s\n    - Skills:\n", repository.name)
+			_, _ = fmt.Fprintf(writer, "  - Repository: %s\n    - Skills:\n", repository.name)
 			for _, skill := range repository.skills {
-				fmt.Fprintf(writer, "      - %s\n", skill)
+				_, _ = fmt.Fprintf(writer, "      - %s\n", skill)
 			}
 		}
 	}
@@ -1348,7 +1348,7 @@ func logSummary(writer io.Writer, operation string, outcomes []operationOutcome)
 		}
 		printGroup(section.title, section.groups)
 	}
-	fmt.Fprintf(writer, "Completed %d operation(s); %d failed.\n", len(outcomes), failed)
+	_, _ = fmt.Fprintf(writer, "Completed %d operation(s); %d failed.\n", len(outcomes), failed)
 	return failed
 }
 
@@ -1357,7 +1357,7 @@ func confirm(c *cli.Context, opts commandOptions, action string) error {
 		return nil
 	}
 	writer := commandWriter(c)
-	fmt.Fprintf(writer, "Proceed to %s? [y/N]: ", action)
+	_, _ = fmt.Fprintf(writer, "Proceed to %s? [y/N]: ", action)
 	reader := c.App.Reader
 	if reader == nil {
 		reader = os.Stdin
@@ -1377,8 +1377,8 @@ func commandLogger(_ *cli.Context, _ bool) *slog.Logger {
 }
 
 func printHeading(writer io.Writer, title string) {
-	fmt.Fprintln(writer)
-	fmt.Fprintln(writer, colorizeHeading(title))
+	_, _ = fmt.Fprintln(writer)
+	_, _ = fmt.Fprintln(writer, colorizeHeading(title))
 }
 
 // colorizeHeading highlights a section heading for terminal output.

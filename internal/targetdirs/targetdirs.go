@@ -114,16 +114,6 @@ func splitComma(s string) []string {
 	return out
 }
 
-// normalizePaths rejects empty entries (already filtered) and dedups.
-func normalizePaths(paths []string) ([]string, error) {
-	for _, p := range paths {
-		if strings.TrimSpace(p) == "" {
-			return nil, fmt.Errorf("invalid empty path entry")
-		}
-	}
-	return dedup(paths), nil
-}
-
 func dedup(in []string) []string {
 	seen := map[string]bool{}
 	out := []string{}

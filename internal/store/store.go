@@ -140,7 +140,7 @@ func StoreSkill(sourcePath, destinationPath string, overwrite ...bool) (bool, er
 	if err != nil {
 		return false, fmt.Errorf("create temporary skill directory: %w", err)
 	}
-	defer os.RemoveAll(temporaryPath)
+	defer func() { _ = os.RemoveAll(temporaryPath) }()
 
 	if err := copyDirectory(sourcePath, temporaryPath); err != nil {
 		return false, err
@@ -151,7 +151,7 @@ func StoreSkill(sourcePath, destinationPath string, overwrite ...bool) (bool, er
 		if err := os.Rename(destinationPath, backupPath); err != nil {
 			return false, fmt.Errorf("stage existing stored skill: %w", err)
 		}
-		defer os.RemoveAll(backupPath)
+		defer func() { _ = os.RemoveAll(backupPath) }()
 	} else if !os.IsNotExist(err) {
 		return false, fmt.Errorf("inspect stored skill: %w", err)
 	}
@@ -296,7 +296,7 @@ func copyFile(sourcePath, destinationPath string) error {
 	if err != nil {
 		return err
 	}
-	defer sourceFile.Close()
+	defer func() { _ = sourceFile.Close() }()
 
 	info, err := sourceFile.Stat()
 	if err != nil {
