@@ -1,28 +1,28 @@
 class SkillManagerCli < Formula
   desc "Manage agent skills"
   homepage "https://github.com/ansidev/skill-manager-cli"
-  version "1.0.0"
+  version "1.1.0"
   license "MIT"
 
   on_macos do
     on_intel do
-      url "https://github.com/ansidev/skill-manager-cli/releases/download/v1.0.0/skill-manager-cli_1.0.0_darwin_amd64.tar.gz"
-      sha256 "271a7ebb133d94859c757ca125b1aaac764558c6630c77dd3bf0c100dae4b377"
+      url "https://github.com/ansidev/skill-manager-cli/releases/download/v1.1.0/skill-manager-cli_1.1.0_darwin_amd64.tar.gz"
+      sha256 "791f980e144c061956c3a6193ff0c002d9c32093ab37fa89c5e3ddd43762612a"
     end
     on_arm do
-      url "https://github.com/ansidev/skill-manager-cli/releases/download/v1.0.0/skill-manager-cli_1.0.0_darwin_arm64.tar.gz"
-      sha256 "7c372a26173ffc94f221d47282ed9222229d823434dd9dda829e319bd5dc14a3"
+      url "https://github.com/ansidev/skill-manager-cli/releases/download/v1.1.0/skill-manager-cli_1.1.0_darwin_arm64.tar.gz"
+      sha256 "670c664600d56765489c197fe07783a1f6dc586e59ae126867c2b37b66513558"
     end
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/ansidev/skill-manager-cli/releases/download/v1.0.0/skill-manager-cli_1.0.0_linux_amd64.tar.gz"
-      sha256 "fe6e74ca5b7eae93ab5284ed4e1114beadeb699cc88f9fe4dd9804c300403991"
+      url "https://github.com/ansidev/skill-manager-cli/releases/download/v1.1.0/skill-manager-cli_1.1.0_linux_amd64.tar.gz"
+      sha256 "35577cb4ae8887beb480d59f8e5de3f85e4666bf5c216260bf2bf09ef89a3517"
     end
     on_arm do
-      url "https://github.com/ansidev/skill-manager-cli/releases/download/v1.0.0/skill-manager-cli_1.0.0_linux_arm64.tar.gz"
-      sha256 "8277b3f269bb9be82858d7013bad2961de067eb2aa4dbf90bd0601a6ca7d8c41"
+      url "https://github.com/ansidev/skill-manager-cli/releases/download/v1.1.0/skill-manager-cli_1.1.0_linux_arm64.tar.gz"
+      sha256 "eaa8ba917c693b90cb29d09135d30810981f312320e3f4511f7119ade247d1ad"
     end
   end
 
