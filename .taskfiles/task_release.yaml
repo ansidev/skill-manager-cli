@@ -15,7 +15,7 @@ tasks:
     desc: Install tools
     cmds:
       - go install github.com/miniscruff/changie@latest
-      - brew install git-cliff
+      - brew install git-cliff typos-cli
 
   batch_changelog:
     desc: Generate changelog for existing git tags
@@ -26,10 +26,11 @@ tasks:
         for VERSION_TAG in $(git -c 'versionsort.suffix=-' tag --list --sort=v:refname); do
           PREV_TAG=$(git -c 'versionsort.suffix=-' tag --list --sort=v:refname | awk -v t="${VERSION_TAG}" '$0==t{exit} {last=$0} END{print last}')
           if [ -z "${PREV_TAG}" ]; then
-            # First tag: no previous tag, range from the root commit (itself excluded)
-            PREV_TAG=$(git rev-list --max-parents=0 "${VERSION_TAG}" | tail -1)
+            # First tag: no previous tag; a bare full SHA walks the full history (a range would drop the root commit)
+            git-cliff --strip header "$(git rev-list -1 "${VERSION_TAG}")" --output ${CHANGES_DIR}/${VERSION_TAG}.md
+          else
+            git-cliff --strip header "${PREV_TAG}..${VERSION_TAG}" --output ${CHANGES_DIR}/${VERSION_TAG}.md
           fi
-          git-cliff --strip all "${PREV_TAG}..${VERSION_TAG}" --output ${CHANGES_DIR}/${VERSION_TAG}.md
         done
     silent: true
 
@@ -43,10 +44,13 @@ tasks:
         VERSION_TAG="{{.VERSION_TAG}}"
         PREV_TAG=$(git -c 'versionsort.suffix=-' tag --list --sort=v:refname | awk -v t="${VERSION_TAG}" '$0==t{exit} {last=$0} END{print last}')
         if [ -z "${PREV_TAG}" ]; then
-          # First tag: no previous tag, range from the root commit (itself excluded)
-          PREV_TAG=$(git rev-list --max-parents=0 "${VERSION_TAG}" | tail -1)
+          # First tag: no previous tag; a bare full SHA walks the full history (a range would drop the root commit)
+          echo "Version range: full history up to ${VERSION_TAG}"
+          git-cliff --strip header "$(git rev-list -1 "${VERSION_TAG}")" --output ${CHANGES_DIR}/${VERSION_TAG}.md
+        else
+          echo "Version range: ${PREV_TAG}..${VERSION_TAG}"
+          git-cliff --strip header "${PREV_TAG}..${VERSION_TAG}" --output ${CHANGES_DIR}/${VERSION_TAG}.md
         fi
-        git-cliff --strip all "${PREV_TAG}..${VERSION_TAG}" --output ${CHANGES_DIR}/${VERSION_TAG}.md
     silent: true
 
   changelog_next:
@@ -55,7 +59,7 @@ tasks:
       VERSION_TAG: ${TAG_PREFIX}{{.VERSION}}
     cmds:
       - mkdir -p ${CHANGES_DIR}
-      - git-cliff --strip all --unreleased --tag {{.VERSION_TAG}} --output ${CHANGES_DIR}/{{.VERSION_TAG}}.md
+      - git-cliff --strip header --unreleased --tag {{.VERSION_TAG}} --output ${CHANGES_DIR}/{{.VERSION_TAG}}.md
     silent: true
 
   commit_release:
@@ -85,5 +89,6 @@ tasks:
           git-cliff -v --unreleased --tag {{.VERSION_TAG}} --output ${CHANGELOG_FILE}
         fi
       - task: changelog_next
+      - changie merge
       - task: commit_release
     silent: true

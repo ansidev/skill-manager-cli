@@ -1,0 +1,4 @@
+# Generated release artifacts and the changelog contain commit hashes and
+# tool output that trip false positives; skip them entirely.
+[files]
+extend-exclude = ["CHANGELOG.md", "dist"]

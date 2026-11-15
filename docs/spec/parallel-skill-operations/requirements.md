@@ -8,7 +8,7 @@ As a CLI user managing skills across several repositories and agent directories,
 
 1. WHEN a skill is installed THEN the CLI SHALL create a symlink in every selected mapped skill directory.
 2. WHEN a target path conflicts with a symlink operation THEN the CLI SHALL report the failure and continue attempting the other selected targets.
-3. WHEN a repository becomes available THEN the CLI SHALL resolve and apply its configured skills without waiting for other repository clones to finish.
+3. WHEN a repository becomes available THEN the CLI SHALL resolve and apply its configured skills without waiting for other repository clones to finish. (Superseded for `apply` by requirement 8 of `docs/spec/apply-conflict-reporting`: `apply` now resolves all repositories before performing any action so conflicts can be reported first.)
 4. WHEN skills are installed or uninstalled while other clones remain in progress THEN the CLI SHALL show live progress for those operations.
 5. WHEN an operation finishes THEN the final report SHALL list each symlink actually created or deleted beneath its skill, including its full destination path.
 6. WHEN an operation heading is printed THEN the CLI SHALL highlight it and place a blank line immediately before it.

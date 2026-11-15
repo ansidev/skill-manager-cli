@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestApplyProcessesAvailableRepositoryWhileCloneIsPending(t *testing.T) {
+func TestApplyResolvesAllRepositoriesBeforeApplying(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(root, "skill-cli")
 	build := exec.Command("go", "build", "-o", binary, "../..")
@@ -84,11 +84,12 @@ func TestApplyProcessesAvailableRepositoryWhileCloneIsPending(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		_, waitingErr := os.Stat(waiting)
-		_, oneErr := os.Lstat(filepath.Join(one, "fast"))
-		_, twoErr := os.Lstat(filepath.Join(two, "fast"))
+		_, fastErr := os.Lstat(filepath.Join(one, "fast"))
 		data, _ := os.ReadFile(outputPath)
-		_, removedErr := os.Lstat(filepath.Join(root, "store", "retired"))
-		if waitingErr == nil && oneErr == nil && twoErr == nil && os.IsNotExist(removedErr) && strings.Contains(string(data), "Install skill: fast") && strings.Contains(string(data), "Uninstall skill: retired") {
+		_, retiredErr := os.Lstat(filepath.Join(root, "store", "retired"))
+		// No skill operation may run while any repository clone is pending:
+		// apply must resolve every repository before performing actions.
+		if waitingErr == nil && os.IsNotExist(fastErr) && retiredErr == nil && strings.Contains(string(data), "Clone repo: slow") {
 			break
 		}
 		select {
@@ -97,13 +98,17 @@ func TestApplyProcessesAvailableRepositoryWhileCloneIsPending(t *testing.T) {
 			t.Fatalf("command finished while clone should be blocked: %v\n%s", err, data)
 		default:
 		}
+		if _, installedErr := os.Lstat(filepath.Join(root, "store", "fast")); installedErr == nil {
+			t.Fatalf("skill installed while a repository clone was still pending: %s", data)
+		}
+		if _, uninstalledErr := os.Lstat(filepath.Join(root, "store", "retired")); os.IsNotExist(uninstalledErr) {
+			t.Fatalf("skill uninstalled while a repository clone was still pending: %s", data)
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("fast install or live progress blocked by slow clone: %s", data)
+			t.Fatalf("slow clone never blocked apply: %s", data)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	assertLinkTarget(t, filepath.Join(one, "fast"), filepath.Join(root, "store", "fast"))
-	assertLinkTarget(t, filepath.Join(two, "fast"), filepath.Join(root, "store", "fast"))
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -113,6 +118,8 @@ func TestApplyProcessesAvailableRepositoryWhileCloneIsPending(t *testing.T) {
 		data, _ := os.ReadFile(outputPath)
 		t.Fatalf("apply: %v\n%s", err, data)
 	}
+	assertLinkTarget(t, filepath.Join(one, "fast"), filepath.Join(root, "store", "fast"))
+	assertLinkTarget(t, filepath.Join(two, "fast"), filepath.Join(root, "store", "fast"))
 	assertLinkTarget(t, filepath.Join(one, "slow"), filepath.Join(root, "store", "slow"))
 	assertLinkTarget(t, filepath.Join(two, "slow"), filepath.Join(root, "store", "slow"))
 }

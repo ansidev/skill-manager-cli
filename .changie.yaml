@@ -1,6 +1,6 @@
 changesDir: .changes
 unreleasedDir: unreleased
-headerPath: ../.chglog/CHANGELOG_HEADER.tpl.md
+headerPath: ../.changie/CHANGELOG_HEADER.md
 changelogPath: CHANGELOG.md
 versionExt: md
 newlines:
