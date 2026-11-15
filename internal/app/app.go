@@ -182,6 +182,14 @@ func apply(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("load config.yaml: %w", err)
 	}
+	// Fail fast on configuration-detectable state conflicts: without a
+	// wildcard entry the effective names and states are known from the
+	// configuration alone, so report and exit before printing the plan,
+	// requesting confirmation, or obtaining any repository.
+	if conflicts := configStateConflicts(cfg); len(conflicts) > 0 {
+		printSkillConflicts(commandWriter(c), conflicts)
+		return fmt.Errorf("apply failed due to %d conflicting skill(s)", len(conflicts))
+	}
 	targets, err := targetdirs.Resolve(c.String("skill-dirs"), c.String("agents"), cfg)
 	if err != nil {
 		return err

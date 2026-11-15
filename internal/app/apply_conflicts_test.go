@@ -27,7 +27,12 @@ func TestApplyReportsStateConflictAcrossRepositories(t *testing.T) {
 	if err == nil {
 		t.Fatalf("apply should fail on conflicting states:\n%s", output.String())
 	}
-	assertOutputContains(t, output.String(), "Skill conflicts", "conflicting states", "repo-a", "repo-b", "shared (failed:")
+	assertOutputContains(t, output.String(), "Skill conflicts", "conflicting states", "repo-a", "repo-b", "skills/shared")
+	// Fail-fast exits before the plan is printed and before any repository
+	// is acquired.
+	if bytes.Contains(output.Bytes(), []byte("Skills to install")) || bytes.Contains(output.Bytes(), []byte("Skills to uninstall")) {
+		t.Fatalf("fail-fast must exit before printing the apply plan:\n%s", output.String())
+	}
 	// Neither repository's request may take effect.
 	assertPathMissing(t, filepath.Join(root, ".agents", "skills", "shared"))
 	assertPathMissing(t, filepath.Join(target, "shared"))
@@ -127,6 +132,119 @@ func TestApplyReportsConflictWithoutMutatingInDryRun(t *testing.T) {
 	}
 	assertOutputContains(t, output.String(), "Skill conflicts")
 	assertPathMissing(t, filepath.Join(root, ".agents", "skills", "shared"))
+}
+
+// unreachableRepositoryConfig writes a config with one local repository and
+// one repository that can only be obtained over the network (unreachable), so
+// a passing apply proves no repository acquisition was attempted.
+func unreachableRepositoryConfig(t *testing.T, root string) {
+	repoA := filepath.Join(root, "repo-a")
+	writeFile(t, filepath.Join(repoA, "skills", "shared", "SKILL.md"), "# From A\n")
+	target := filepath.Join(root, "agent", "skills")
+	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+target+"\nskills:\n  - repo: "+repoA+"\n    provider:\n      type: local\n    skills:\n      - name: shared\n  - repo: unreachable/repo\n    provider:\n      type: custom\n      base_url: http://127.0.0.1:9/git\n    skills:\n      - name: shared\n        state: uninstalled\n")
+}
+
+func TestApplyFailsFastOnStateConflictBeforeAcquisition(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+	unreachableRepositoryConfig(t, root)
+	target := filepath.Join(root, "agent", "skills")
+
+	app := New("dev", "test")
+	var output bytes.Buffer
+	app.Writer = &output
+	err := app.Run([]string{"skill", "apply", "--yes", "--agents", "pi"})
+	if err == nil {
+		t.Fatalf("apply should fail fast on a configuration-detectable state conflict:\n%s", output.String())
+	}
+	assertOutputContains(t, output.String(), "Skill conflicts", "conflicting states", "repo-a", "unreachable/repo", "skills/shared")
+	// The failure must happen before the plan and before any repository
+	// acquisition: the plan headings and clone errors must be absent.
+	if bytes.Contains(output.Bytes(), []byte("Skills to install")) || bytes.Contains(output.Bytes(), []byte("Skills to uninstall")) {
+		t.Fatalf("fail-fast must exit before printing the apply plan:\n%s", output.String())
+	}
+	if bytes.Contains(output.Bytes(), []byte("Clone repo")) {
+		t.Fatalf("fail-fast must exit before acquiring any repository:\n%s", output.String())
+	}
+	assertPathMissing(t, filepath.Join(root, ".agents", "skills", "shared"))
+	assertPathMissing(t, filepath.Join(target, "shared"))
+}
+
+func TestApplyFailsFastOnStateConflictInDryRun(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+	unreachableRepositoryConfig(t, root)
+	target := filepath.Join(root, "agent", "skills")
+
+	app := New("dev", "test")
+	var output bytes.Buffer
+	app.Writer = &output
+	err := app.Run([]string{"skill", "apply", "--yes", "--dry-run", "--agents", "pi"})
+	if err == nil {
+		t.Fatalf("dry run should fail fast on a configuration-detectable state conflict:\n%s", output.String())
+	}
+	assertOutputContains(t, output.String(), "Skill conflicts", "conflicting states")
+	if bytes.Contains(output.Bytes(), []byte("Skills to install")) {
+		t.Fatalf("fail-fast must exit before printing the apply plan even in dry run:\n%s", output.String())
+	}
+	assertPathMissing(t, filepath.Join(root, ".agents", "skills", "shared"))
+	assertPathMissing(t, filepath.Join(target, "shared"))
+}
+
+func TestConfigStateConflicts(t *testing.T) {
+	entry := func(name, state string) config.SkillEntry {
+		return config.SkillEntry{Name: name, State: state}
+	}
+	t.Run("state conflict across repositories", func(t *testing.T) {
+		cfg := &config.Config{Skills: []config.Repository{
+			{Repo: "repo-a", Skills: []config.SkillEntry{entry("shared", "installed")}},
+			{Repo: "repo-b", Skills: []config.SkillEntry{entry("shared", "uninstalled")}},
+		}}
+		conflicts := configStateConflicts(cfg)
+		if len(conflicts) != 1 {
+			t.Fatalf("conflicts = %v, want 1", conflicts)
+		}
+		if conflicts[0].Name != "shared" {
+			t.Errorf("conflict name = %q, want %q", conflicts[0].Name, "shared")
+		}
+	})
+	t.Run("empty states are normalized to installed", func(t *testing.T) {
+		cfg := &config.Config{Skills: []config.Repository{
+			{Repo: "repo-a", Skills: []config.SkillEntry{entry("shared", "")}},
+			{Repo: "repo-b", Skills: []config.SkillEntry{entry("shared", "installed")}},
+		}}
+		if conflicts := configStateConflicts(cfg); len(conflicts) != 0 {
+			t.Fatalf("conflicts = %v, want none", conflicts)
+		}
+	})
+	t.Run("same name within one repository is not a conflict", func(t *testing.T) {
+		cfg := &config.Config{Skills: []config.Repository{
+			{Repo: "repo-a", Skills: []config.SkillEntry{entry("shared", "installed"), entry("shared", "uninstalled")}},
+		}}
+		if conflicts := configStateConflicts(cfg); len(conflicts) != 0 {
+			t.Fatalf("conflicts = %v, want none", conflicts)
+		}
+	})
+	t.Run("all installed across repositories is not a state conflict", func(t *testing.T) {
+		cfg := &config.Config{Skills: []config.Repository{
+			{Repo: "repo-a", Skills: []config.SkillEntry{entry("shared", "installed")}},
+			{Repo: "repo-b", Skills: []config.SkillEntry{entry("shared", "installed")}},
+		}}
+		if conflicts := configStateConflicts(cfg); len(conflicts) != 0 {
+			t.Fatalf("conflicts = %v, want none", conflicts)
+		}
+	})
+	t.Run("wildcard anywhere disables fail-fast detection", func(t *testing.T) {
+		cfg := &config.Config{Skills: []config.Repository{
+			{Repo: "repo-a", Skills: []config.SkillEntry{entry("shared", "installed")}},
+			{Repo: "repo-b", Skills: []config.SkillEntry{entry("*", "")}},
+		}}
+		if conflicts := configStateConflicts(cfg); len(conflicts) != 0 {
+			t.Fatalf("conflicts = %v, want none", conflicts)
+		}
+	})
 }
 
 func TestDetectSkillConflicts(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/ansidev/skill-manager-cli/internal/config"
 	"github.com/ansidev/skill-manager-cli/internal/source"
 	"github.com/ansidev/skill-manager-cli/internal/store"
 )
@@ -68,6 +69,50 @@ func detectSkillConflicts(pending []pendingSkill) []skillConflict {
 			conflict = describeContentConflict(name, candidates)
 		}
 		if conflict != nil {
+			conflicts = append(conflicts, *conflict)
+		}
+	}
+	return conflicts
+}
+
+// configStateConflicts detects state conflicts between repositories from the
+// configuration alone. When no entry is named "*", the effective skill names
+// and their requested states are fully determined by the configuration, so
+// apply can fail before obtaining any repository. A wildcard entry anywhere
+// disables this detection entirely: names resolved from "*" can only be known
+// after repositories are resolved, and criterion 13 allows same-named entries
+// requested as installed until their content has been resolved.
+func configStateConflicts(cfg *config.Config) []skillConflict {
+	groups := make(map[string][]conflictCandidate)
+	order := make([]string, 0, len(cfg.Skills))
+	for _, repository := range cfg.Skills {
+		for _, entry := range repository.Skills {
+			if entry.Name == "*" {
+				return nil
+			}
+			name := entry.Name
+			if _, ok := groups[name]; !ok {
+				order = append(order, name)
+			}
+			groups[name] = append(groups[name], conflictCandidate{
+				repository: repository.Repo,
+				state:      normalizeSkillState(entry.State),
+				inRepoPath: config.JoinBase(entry.BasePath, entry.Name),
+			})
+		}
+	}
+
+	conflicts := make([]skillConflict, 0)
+	for _, name := range order {
+		candidates := groups[name]
+		repositories := make(map[string]bool, len(candidates))
+		for _, candidate := range candidates {
+			repositories[candidate.repository] = true
+		}
+		if len(repositories) < 2 {
+			continue
+		}
+		if conflict := describeStateConflict(name, candidates); conflict != nil {
 			conflicts = append(conflicts, *conflict)
 		}
 	}
