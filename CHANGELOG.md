@@ -2,51 +2,67 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) and this project adheres to [Semantic Versioning](http://semver.org).
+See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
-## v1.0.0 - 2026-11-14
+## [v1.0.0] - 2026-11-14
+
 ### Bug Fixes
-- Preserve physical skill store copies
-- **source:** Validate skill names against absolute roots
-- **cli:** Align skill dirs home expansion and add before/after operation logs
-- **SMC-5:** Correct skill installation and removal state
-- **SMC-4:** Harden operation reports and overwrite paths
-- **SMC-4:** Refine operation reporting and overwrite handling
-- **SMC-6:** Correct direct skill selection
-- Correct release configuration and metadata
 
-### Code Refactoring
-- Handle unchecked errors and remove dead code to satisfy linters
+- **SMC-4**:  harden operation reports and overwrite paths - [e5cc59f](https://github.com/ansidev/skill-manager-cli/commit/e5cc59f0f57650c00cbd991ef5cf0a1213ef4c98) by [@ansidev](https://github.com/ansidev)
+- **SMC-4**:  refine operation reporting and overwrite handling - [c6d8e5a](https://github.com/ansidev/skill-manager-cli/commit/c6d8e5a9d3cf210d746a20bc1bf6cc2f33534a3f) by [@ansidev](https://github.com/ansidev)
+- **SMC-5**:  correct skill installation and removal state - [1a542d6](https://github.com/ansidev/skill-manager-cli/commit/1a542d6128f6631acd95eaca8667a24e39014f78) by [@ansidev](https://github.com/ansidev)
+- **SMC-6**:  correct direct skill selection - [ca27a88](https://github.com/ansidev/skill-manager-cli/commit/ca27a8880da6bae4c6a946f70cbb38e02c3e987c) by [@ansidev](https://github.com/ansidev)
+- **cli**:  align skill dirs home expansion and add before/after operation logs - [b9169f4](https://github.com/ansidev/skill-manager-cli/commit/b9169f417f02fbc0aeadba80860b44503d89bc30) by [@ansidev](https://github.com/ansidev)
+- **release**:  move commit_parsers under [git] so custom groups take effect - [8146453](https://github.com/ansidev/skill-manager-cli/commit/814645356929db974a4bb2c622862945f3c50550) by [@ansidev](https://github.com/ansidev)
+- **source**:  validate skill names against absolute roots - [9cbdaa2](https://github.com/ansidev/skill-manager-cli/commit/9cbdaa2703da6c86f78d58b134beb4f64230d81b) by [@ansidev](https://github.com/ansidev)
+- preserve physical skill store copies - [3ef87a4](https://github.com/ansidev/skill-manager-cli/commit/3ef87a45f14d33cf130d38ca6af8592d3235d3bc) by [@ansidev](https://github.com/ansidev)
+- correct release configuration and metadata - [16883da](https://github.com/ansidev/skill-manager-cli/commit/16883daa3c442e92cdf90f41671da3a57b869c6d) by [@ansidev](https://github.com/ansidev)
+- update GitHub Actions workflows - [e20dc85](https://github.com/ansidev/skill-manager-cli/commit/e20dc858348bcdd01ac588f98ebe6d6ad88cb52d) by [@ansidev](https://github.com/ansidev)
+
+### Build
+
+- add cross-platform release binaries - [28b7c83](https://github.com/ansidev/skill-manager-cli/commit/28b7c83fe7dc9e340ce9d4ad1d80cb61e6284c98) by [@ansidev](https://github.com/ansidev)
 
 ### Features
-- **cli:** Add root command registry
-- Add central skill store
-- Manage skill links safely
-- Remove only managed skills
-- **config:** Define configuration model and init example config
-- **cli:** Resolve target skill directories from shared flags (SMC-5)
-- **source:** Resolve skill sources and obtain repository workspaces
-- **source:** Resolve configured skill paths
-- **SMC-9:** Implement apply orchestration and confirmation flow
-- **cli:** Add install and uninstall commands (SMC-10)
-- **cli:** Add operation summaries to apply, install, and uninstall (SMC-11)
-- **ASM-3:** Show live per-repo and per-skill status during apply
-- **ASM-3:** Add live progress for skill operations
-- **SMC-4:** Clarify operation report sections and add overwrite mode
-- Generate Homebrew formula from release assets
-- Add release scripts
+
+- **ASM-3**:  show live per-repo and per-skill status during apply - [1436744](https://github.com/ansidev/skill-manager-cli/commit/14367448d6b1c210d15c57cd3d9b0ad76fd854b0) by [@ansidev](https://github.com/ansidev)
+- **ASM-3**:  add live progress for skill operations - [c587d26](https://github.com/ansidev/skill-manager-cli/commit/c587d26fc66de3dc34d1b7af5494f1d5fe0eb5c1) by [@ansidev](https://github.com/ansidev)
+- **SMC-4**:  clarify operation report sections and add overwrite mode - [6f2687d](https://github.com/ansidev/skill-manager-cli/commit/6f2687d11d32460df0e6c51ffb17096cc7b4e49a) by [@ansidev](https://github.com/ansidev)
+- **SMC-9**:  implement apply orchestration and confirmation flow - [60fe147](https://github.com/ansidev/skill-manager-cli/commit/60fe147a5f87c96f8605c8ff16b71b70a8f071bb) by [@ansidev](https://github.com/ansidev)
+- **cli**:  add root command registry - [ab87325](https://github.com/ansidev/skill-manager-cli/commit/ab87325a8782848aaac52f530b93f32a2ee8f985) by [@ansidev](https://github.com/ansidev)
+- **cli**:  resolve target skill directories from shared flags (SMC-5) - [84ba443](https://github.com/ansidev/skill-manager-cli/commit/84ba443518c92bc73f4a17c69706427e3191c5e6) by [@ansidev](https://github.com/ansidev)
+- **cli**:  add install and uninstall commands (SMC-10) - [fc4bf49](https://github.com/ansidev/skill-manager-cli/commit/fc4bf49f7fc540c85e3617c2680cbb6e3537e209) by [@ansidev](https://github.com/ansidev)
+- **cli**:  add operation summaries to apply, install, and uninstall (SMC-11) - [003a542](https://github.com/ansidev/skill-manager-cli/commit/003a5421dec5ef28c6507baa8a523243b7ed3787) by [@ansidev](https://github.com/ansidev)
+- **config**:  define configuration model and init example config - [b88e3fd](https://github.com/ansidev/skill-manager-cli/commit/b88e3fd718937179d1583f0f9313e5444740b168) by [@ansidev](https://github.com/ansidev)
+- **source**:  resolve skill sources and obtain repository workspaces - [e571bc3](https://github.com/ansidev/skill-manager-cli/commit/e571bc38825e2983c5b266cd09326de4ffeccd83) by [@ansidev](https://github.com/ansidev)
+- **source**:  resolve configured skill paths - [652df7b](https://github.com/ansidev/skill-manager-cli/commit/652df7b2496b220c5d2681ad4aeede59babd70d5) by [@ansidev](https://github.com/ansidev)
+- add central skill store - [0a56d30](https://github.com/ansidev/skill-manager-cli/commit/0a56d30d36df5a1610a9b56ab9ad068018e0d543) by [@ansidev](https://github.com/ansidev)
+- manage skill links safely - [5dc16a1](https://github.com/ansidev/skill-manager-cli/commit/5dc16a1d71b82325f2f4f53b7fe48c672c09955b) by [@ansidev](https://github.com/ansidev)
+- remove only managed skills - [4894c2c](https://github.com/ansidev/skill-manager-cli/commit/4894c2cf1636fffd3bfa5dbff991d41282523d2d) by [@ansidev](https://github.com/ansidev)
+- generate Homebrew formula from release assets - [53f2295](https://github.com/ansidev/skill-manager-cli/commit/53f22952ae8b2e33b583408b68ae0b2ae1810a57) by [@ansidev](https://github.com/ansidev)
+- add release scripts - [95c3eff](https://github.com/ansidev/skill-manager-cli/commit/95c3eff36c2314defc5fd4a7277e6003643813cd) by [@ansidev](https://github.com/ansidev)
 
 ### Miscellaneous Chores
-- Add project configuration and release workflow
-- Initial commit
-- Uninstall openspec
-- Rename skill-manager to skill-manager-cli
-- Add cross-platform release binaries
-- **SMC-7:** Replace CLAUDE guidance with AGENTS
-- Update .taskfiles/task_release.yaml
 
-### Other
-- Print apply plan before confirmation
+- **SMC-7**:  replace CLAUDE guidance with AGENTS - [b568b4a](https://github.com/ansidev/skill-manager-cli/commit/b568b4a14b013ecbe0c5a51f73a329def94e675a) by [@ansidev](https://github.com/ansidev)
+- add project configuration and release workflow - [61fb7c7](https://github.com/ansidev/skill-manager-cli/commit/61fb7c76435b72f9f1864ae949c4be68b2d62408) by [@ansidev](https://github.com/ansidev)
+- initial commit - [9b2e2f2](https://github.com/ansidev/skill-manager-cli/commit/9b2e2f296236751e1c0138458ac69a0734a03cec) by [@ansidev](https://github.com/ansidev)
+- Bootstrap Go CLI module, dependency injection, and build metadata - [6b27186](https://github.com/ansidev/skill-manager-cli/commit/6b27186b88eabc6a5e65d704637953927927db1d) by [@ansidev](https://github.com/ansidev)
+- uninstall openspec - [5c26a65](https://github.com/ansidev/skill-manager-cli/commit/5c26a6571fc0c98b66052ab9a9a83a0062d0a040) by [@ansidev](https://github.com/ansidev)
+- rename skill-manager to skill-manager-cli - [4d4ca0f](https://github.com/ansidev/skill-manager-cli/commit/4d4ca0f45576ddc2f677627201b75ff22792072c) by [@ansidev](https://github.com/ansidev)
+- print apply plan before confirmation - [583fe38](https://github.com/ansidev/skill-manager-cli/commit/583fe38704cdaef199eb99ec5f9404b56b3203bd) by [@ansidev](https://github.com/ansidev)
+- update .taskfiles/task_release.yaml - [121e849](https://github.com/ansidev/skill-manager-cli/commit/121e849fc574230f771617d18b44083cb6bd3469) by [@ansidev](https://github.com/ansidev)
+
+### Refactoring
+
+- handle unchecked errors and remove dead code to satisfy linters - [9db23a2](https://github.com/ansidev/skill-manager-cli/commit/9db23a2f593ad77b4190e1b1d48228312b3b720e) by [@ansidev](https://github.com/ansidev)
 
 ### Tests
-- **cli:** Cover direct command flags, config fallback, and uninstall safety (SMC-10)
+
+- **cli**:  cover direct command flags, config fallback, and uninstall safety (SMC-10) - [49db41a](https://github.com/ansidev/skill-manager-cli/commit/49db41a5d9328e2b631dd46b0e2fc6e5412be26f) by [@ansidev](https://github.com/ansidev)
+
+
+
+[v1.0.0]: https://github.com/ansidev/skill-manager-cli/tree/v1.0.0
+
+<!-- generated by git-cliff -->
