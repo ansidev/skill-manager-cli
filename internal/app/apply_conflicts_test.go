@@ -343,6 +343,100 @@ func TestApplyConflictLeavesIndependentSkillsApplied(t *testing.T) {
 	assertPathMissing(t, filepath.Join(root, ".agents", "skills", "shared"))
 }
 
+func TestApplyContinuesNormalFlowWithoutConfigStateConflict(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+
+	repoA := filepath.Join(root, "repo-a")
+	repoB := filepath.Join(root, "repo-b")
+	writeFile(t, filepath.Join(repoA, "skills", "alpha", "SKILL.md"), "# Alpha\n")
+	writeFile(t, filepath.Join(repoB, "skills", "beta", "SKILL.md"), "# Beta\n")
+	target := filepath.Join(root, "agent", "skills")
+	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+target+"\nskills:\n  - repo: "+repoA+"\n    provider:\n      type: local\n    skills:\n      - name: alpha\n  - repo: "+repoB+"\n    provider:\n      type: local\n    skills:\n      - name: beta\n")
+
+	app := New("dev", "test")
+	var output bytes.Buffer
+	app.Writer = &output
+	if err := app.Run([]string{"skill", "apply", "--yes", "--agents", "pi"}); err != nil {
+		t.Fatalf("apply should succeed when no configuration state conflict exists: %v\n%s", err, output.String())
+	}
+	assertOutputContains(t, output.String(), "Installed skills", "alpha (installed)", "beta (installed)", "Completed 2 operation(s); 0 failed.")
+	if bytes.Contains(output.Bytes(), []byte("Skill conflicts")) {
+		t.Fatalf("no conflict must be reported for disjoint skill names:\n%s", output.String())
+	}
+	storeAlpha := filepath.Join(root, ".agents", "skills", "alpha")
+	assertFileExists(t, filepath.Join(storeAlpha, "SKILL.md"))
+	assertLinkTarget(t, filepath.Join(target, "alpha"), storeAlpha)
+	storeBeta := filepath.Join(root, ".agents", "skills", "beta")
+	assertFileExists(t, filepath.Join(storeBeta, "SKILL.md"))
+	assertLinkTarget(t, filepath.Join(target, "beta"), storeBeta)
+}
+
+func TestApplyWildcardEntrySkipsFailFastAndResolvesRepositories(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+
+	repoA := filepath.Join(root, "repo-a")
+	repoB := filepath.Join(root, "repo-b")
+	repoC := filepath.Join(root, "repo-c")
+	writeFile(t, filepath.Join(repoA, "skills", "shared", "SKILL.md"), "# From A\n")
+	writeFile(t, filepath.Join(repoC, "skills", "solo", "SKILL.md"), "# Solo\n")
+	target := filepath.Join(root, "agent", "skills")
+	// repo-a and repo-b declare a configuration-detectable state conflict,
+	// but repo-c's wildcard entry disables fail-fast, so apply must resolve
+	// every repository first and report through the normal flow.
+	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+target+"\nskills:\n  - repo: "+repoA+"\n    provider:\n      type: local\n    skills:\n      - name: shared\n  - repo: "+repoB+"\n    provider:\n      type: local\n    skills:\n      - name: shared\n        state: uninstalled\n  - repo: "+repoC+"\n    provider:\n      type: local\n    skills:\n      - name: '*'\n")
+
+	app := New("dev", "test")
+	var output bytes.Buffer
+	app.Writer = &output
+	if err := app.Run([]string{"skill", "apply", "--yes", "--agents", "pi"}); err == nil {
+		t.Fatalf("apply should fail after reporting the state conflict:\n%s", output.String())
+	}
+	assertOutputContains(t, output.String(), "Skill conflicts", "conflicting states", "repo-a", "repo-b")
+	// The wildcard-resolved skill proves repositories were acquired and
+	// resolved: the fail-fast path never performs any action.
+	assertOutputContains(t, output.String(), "solo (installed)")
+	assertFileExists(t, filepath.Join(root, ".agents", "skills", "solo", "SKILL.md"))
+	assertLinkTarget(t, filepath.Join(target, "solo"), filepath.Join(root, ".agents", "skills", "solo"))
+	// The conflicting name fails in the post-resolution summary; the final
+	// "Completed" line is printed only by the resolve-then-report flow.
+	assertOutputContains(t, output.String(), "shared (failed:", "Completed 3 operation(s); 2 failed.")
+	assertPathMissing(t, filepath.Join(root, ".agents", "skills", "shared"))
+	assertPathMissing(t, filepath.Join(target, "shared"))
+}
+
+func TestApplySameNamedInstalledEntriesResolveBeforeConflictDecision(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	changeDirectory(t, root)
+
+	repoA := filepath.Join(root, "repo-a")
+	repoB := filepath.Join(root, "repo-b")
+	writeFile(t, filepath.Join(repoA, "skills", "shared", "SKILL.md"), "# From A\n")
+	writeFile(t, filepath.Join(repoB, "skills", "shared", "SKILL.md"), "# From B\n")
+	target := filepath.Join(root, "agent", "skills")
+	// Both repositories declare "shared" as installed. "ghost" does not exist
+	// in repo-a, so its resolution failure in the summary proves that
+	// resolution ran before the content conflict was decided.
+	writeFile(t, filepath.Join(root, "config.yaml"), "dirs:\n  pi: "+target+"\nskills:\n  - repo: "+repoA+"\n    provider:\n      type: local\n    skills:\n      - name: shared\n      - name: ghost\n  - repo: "+repoB+"\n    provider:\n      type: local\n    skills:\n      - name: shared\n")
+
+	app := New("dev", "test")
+	var output bytes.Buffer
+	app.Writer = &output
+	if err := app.Run([]string{"skill", "apply", "--yes", "--agents", "pi"}); err == nil {
+		t.Fatalf("apply should fail after resolving differing content:\n%s", output.String())
+	}
+	assertOutputContains(t, output.String(), "Skill conflicts", "content differs between repositories", "shared (failed:")
+	// The resolution failure proves the resolve phase ran before any conflict
+	// decision, and the final summary line proves the flow passed fail-fast.
+	assertOutputContains(t, output.String(), "ghost (failed:", "Completed 3 operation(s); 3 failed.")
+	assertPathMissing(t, filepath.Join(root, ".agents", "skills", "shared"))
+	assertPathMissing(t, filepath.Join(target, "shared"))
+}
+
 func TestApplyStateConflictDoesNotRemoveStoredSkill(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
