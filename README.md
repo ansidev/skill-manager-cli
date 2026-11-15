@@ -17,7 +17,9 @@ A Go CLI that manages agent skills for coding assistants. It installs skills fro
 ### Homebrew (macOS)
 
 ```sh
-brew install ansidev/tap/skill-manager-cli
+brew tap ansidev/skill-manager-cli https://github.com/ansidev/skill-manager-cli
+brew trust --formula ansidev/skill-manager-cli/skill-manager-cli
+brew install skill-manager-cli
 ```
 
 ### Download a release
