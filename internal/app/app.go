@@ -218,26 +218,38 @@ func apply(c *cli.Context) error {
 		}
 		repositories[i] = prepared
 	}
-	for i := range repositories {
-		for _, entry := range repositories[i].namedUninstalls {
-			outcome, _ := applySkill(logger, c, storeRoot, targets, repositories[i].repository.Repo, repositories[i].sourceLocation, config.JoinBase(entry.BasePath, entry.Name), source.ResolvedSkill{Entry: entry}, progress, nil)
-			outcomes = append(outcomes, outcome)
-		}
-	}
 
-	// Process repositories as soon as they are available. Local repositories
-	// are handled in-line; remote repositories are cloned with bounded
-	// parallelism and each clones triggers its own follow-up skill processing
-	// instead of waiting for every other clone to finish.
+	// Phase 1: acquire every repository and resolve its configured entries
+	// before performing any action, so conflicts between repositories can be
+	// reported before anything is installed or removed.
+	var pending []pendingSkill
+	var pendingMu sync.Mutex
 	var outcomeMu sync.Mutex
-	var skillMu sync.Mutex
 	appendOutcome := func(outcome operationOutcome) {
 		outcomeMu.Lock()
 		defer outcomeMu.Unlock()
 		outcomes = append(outcomes, outcome)
 	}
+	addPending := func(item pendingSkill) {
+		pendingMu.Lock()
+		defer pendingMu.Unlock()
+		pending = append(pending, item)
+	}
 
-	processPrepared := func(prepared *applyRepository, workspace *source.Workspace, obtainErr error) {
+	// Named uninstalls need no repository workspace and are ordered first so
+	// reports read configuration-first.
+	for i := range repositories {
+		for _, entry := range repositories[i].namedUninstalls {
+			pending = append(pending, pendingSkill{
+				repository:     repositories[i].repository.Repo,
+				sourceLocation: repositories[i].sourceLocation,
+				inRepoPath:     config.JoinBase(entry.BasePath, entry.Name),
+				skill:          source.ResolvedSkill{Entry: entry},
+			})
+		}
+	}
+
+	resolvePrepared := func(prepared *applyRepository, workspace *source.Workspace, obtainErr error) {
 		prepared.workspace = workspace
 		prepared.obtainErr = obtainErr
 		repository := prepared.repository
@@ -280,32 +292,25 @@ func apply(c *cli.Context) error {
 			})
 		}
 		for _, skill := range resolution.Skills {
-			skillMu.Lock()
-			outcome, lastBar := applySkill(logger, c, storeRoot, targets, repository.Repo, prepared.sourceLocation, relativeRepositoryPath(prepared.workspace.Path, skill.Path), skill, progress, prepared.progressBar)
-			skillMu.Unlock()
-			prepared.progressBar = lastBar
-			appendOutcome(outcome)
-		}
-		if err := prepared.workspace.Cleanup(); err != nil {
-			appendOutcome(operationOutcome{
-				Operation:  "apply",
-				Action:     actionFailed,
-				Repository: repository.Repo,
-				Source:     prepared.sourceLocation,
-				Targets:    targets,
-				DryRun:     c.Bool("dry-run"),
-				Err:        fmt.Errorf("clean workspace: %w", err),
+			addPending(pendingSkill{
+				repository:     repository.Repo,
+				sourceLocation: prepared.sourceLocation,
+				inRepoPath:     relativeRepositoryPath(prepared.workspace.Path, skill.Path),
+				skill:          skill,
 			})
 		}
 	}
 
+	// Local repositories are handled in-line; remote repositories are cloned
+	// with bounded parallelism. No skill operation happens until every
+	// repository has been resolved.
 	for i := range repositories {
 		if len(repositories[i].entriesToResolve) == 0 {
 			continue
 		}
 		if repositories[i].provider.Type == "local" {
 			workspace, err := resolver.Obtain(repositories[i].repository.Repo, repositories[i].provider)
-			processPrepared(&repositories[i], workspace, err)
+			resolvePrepared(&repositories[i], workspace, err)
 		}
 	}
 
@@ -341,11 +346,60 @@ func apply(c *cli.Context) error {
 					workspace, err := resolver.Obtain(repo.repository.Repo, repo.provider)
 					<-sem
 					completeTask(bar)
-					processPrepared(&repositories[index], workspace, err)
+					resolvePrepared(&repositories[index], workspace, err)
 				}
 			}()
 		}
 		wg.Wait()
+	}
+
+	// Phase 2: detect conflicts between repositories and report them before
+	// performing any action. Conflicting skills are never applied.
+	conflicts := detectSkillConflicts(pending)
+	if len(conflicts) > 0 {
+		printSkillConflicts(commandWriter(c), conflicts)
+	}
+	conflictByName := make(map[string]string, len(conflicts))
+	for _, conflict := range conflicts {
+		conflictByName[conflict.Name] = conflict.Reason
+	}
+
+	// Phase 3: perform the operations that are free of conflicts.
+	for _, item := range pending {
+		if reason, conflicted := conflictByName[item.skill.Entry.Name]; conflicted {
+			appendOutcome(operationOutcome{
+				Operation:  "apply",
+				Skill:      item.skill.Entry.Name,
+				State:      normalizeSkillState(item.skill.Entry.State),
+				Action:     actionFailed,
+				Repository: item.repository,
+				Source:     item.sourceLocation,
+				Path:       item.inRepoPath,
+				Targets:    targets,
+				DryRun:     c.Bool("dry-run"),
+				Err:        errors.New(reason),
+			})
+			continue
+		}
+		outcome, _ := applySkill(logger, c, storeRoot, targets, item.repository, item.sourceLocation, item.inRepoPath, item.skill, progress, nil)
+		appendOutcome(outcome)
+	}
+
+	for i := range repositories {
+		if repositories[i].workspace == nil {
+			continue
+		}
+		if err := repositories[i].workspace.Cleanup(); err != nil {
+			appendOutcome(operationOutcome{
+				Operation:  "apply",
+				Action:     actionFailed,
+				Repository: repositories[i].repository.Repo,
+				Source:     repositories[i].sourceLocation,
+				Targets:    targets,
+				DryRun:     c.Bool("dry-run"),
+				Err:        fmt.Errorf("clean workspace: %w", err),
+			})
+		}
 	}
 
 	progress.wait()

@@ -162,6 +162,13 @@ func StoreSkill(sourcePath, destinationPath string, overwrite ...bool) (bool, er
 	return true, nil
 }
 
+// DirectoriesEqual reports whether two skill directory trees have identical
+// content, comparing relative paths, entry types, symlink targets, and file
+// bytes. A missing tree is never equal to an existing one.
+func DirectoriesEqual(leftPath, rightPath string) (bool, error) {
+	return directoriesEqual(leftPath, rightPath)
+}
+
 func directoriesEqual(leftPath, rightPath string) (bool, error) {
 	leftInfo, err := os.Stat(leftPath)
 	if err != nil {
